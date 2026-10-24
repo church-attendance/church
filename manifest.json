@@ -1,0 +1,19 @@
+{
+  "id": "/church-attendance/app",
+  "name": "حضور الفصول",
+  "short_name": "حضور الفصول",
+  "description": "حضور القداس والاجتماع كل جمعة",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f0ece3",
+  "theme_color": "#24305e",
+  "dir": "rtl",
+  "lang": "ar",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

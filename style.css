@@ -1,0 +1,72 @@
+/* حضور الفصول — theme on top of Bootstrap 5 */
+:root {
+  --bg: #f0ece3; --surface: #fbf9f4; --ink: #24305e; --ink-soft: #5d6378; --line: #d9d2c0; --focus: #3c4f8f;
+  --ok: #3f7a46; --ok-bg: #e0ebd9; --bad: #a3432c; --bad-bg: #f1ded6; --warn: #b7791f; --warn-bg: #f6e8c8;
+  --scale: 1;
+  --bs-body-bg: var(--bg); --bs-body-color: var(--ink); --bs-border-color: var(--line);
+  --bs-secondary-color: var(--ink-soft); --bs-heading-color: var(--ink); --bs-link-color: var(--focus);
+  --bs-body-font-family: Tahoma, Arial, 'Segoe UI', sans-serif;
+}
+:root.hc {
+  --bg: #0d1117; --surface: #171d2a; --ink: #f4f6fb; --ink-soft: #c5cbdb; --line: #4a5470; --focus: #ffd54a;
+  --ok: #7ee08a; --ok-bg: #173322; --bad: #ff8a65; --bad-bg: #3a1f16; --warn: #ffd54a; --warn-bg: #3a3116;
+}
+html { font-size: calc(16px * var(--scale)); }
+body { background: var(--bg); color: var(--ink); }
+.text-secondary { color: var(--ink-soft) !important; }
+.text-body { color: var(--ink) !important; }
+.border, .border-bottom, .border-top { border-color: var(--line) !important; }
+#app { max-width: 520px; padding: 1.2rem 1rem 3rem; min-height: 100vh; }
+.app-header { border-bottom: 2px solid var(--ink); }
+.auth-wrap { max-width: 380px; }
+
+/* Bootstrap colours -> app theme */
+.btn-dark { --bs-btn-color: var(--surface); --bs-btn-bg: var(--ink); --bs-btn-border-color: var(--ink);
+  --bs-btn-hover-color: var(--surface); --bs-btn-hover-bg: var(--focus); --bs-btn-hover-border-color: var(--focus);
+  --bs-btn-active-color: var(--surface); --bs-btn-active-bg: var(--focus); --bs-btn-active-border-color: var(--focus); }
+.btn-outline-dark { --bs-btn-color: var(--ink); --bs-btn-bg: var(--surface); --bs-btn-border-color: var(--line);
+  --bs-btn-hover-color: var(--surface); --bs-btn-hover-bg: var(--ink); --bs-btn-hover-border-color: var(--ink);
+  --bs-btn-active-color: var(--surface); --bs-btn-active-bg: var(--ink); --bs-btn-active-border-color: var(--ink);
+  --bs-btn-disabled-color: var(--ink-soft); --bs-btn-disabled-bg: var(--surface); --bs-btn-disabled-border-color: var(--line); }
+.btn-outline-danger { --bs-btn-color: var(--bad); --bs-btn-bg: var(--bad-bg); --bs-btn-border-color: var(--bad);
+  --bs-btn-hover-color: var(--surface); --bs-btn-hover-bg: var(--bad); --bs-btn-hover-border-color: var(--bad);
+  --bs-btn-active-color: var(--surface); --bs-btn-active-bg: var(--bad); --bs-btn-active-border-color: var(--bad); }
+.btn-link { --bs-btn-color: var(--ink); --bs-btn-hover-color: var(--focus); }
+.btn:focus-visible, .form-control:focus, .form-select:focus, .form-check-input:focus {
+  box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--focus) 35%, transparent); border-color: var(--focus); }
+.form-control, .form-select, .input-group-text { background-color: var(--surface); color: var(--ink); border-color: var(--line); }
+.form-control::placeholder { color: var(--ink-soft); opacity: .8; }
+.form-check-input { background-color: var(--surface); border-color: var(--ink-soft); }
+.form-check-input:checked { background-color: var(--ink); border-color: var(--ink); }
+.card { --bs-card-bg: var(--surface); --bs-card-border-color: var(--line); }
+.list-group { --bs-list-group-bg: transparent; --bs-list-group-color: var(--ink); --bs-list-group-border-color: var(--line); }
+.nav-tabs { --bs-nav-tabs-border-color: var(--line); --bs-nav-link-color: var(--ink-soft); --bs-nav-link-hover-color: var(--ink);
+  --bs-nav-tabs-link-hover-border-color: transparent; --bs-nav-tabs-link-active-color: var(--ink);
+  --bs-nav-tabs-link-active-bg: var(--bg); --bs-nav-tabs-link-active-border-color: var(--line) var(--line) var(--ink); }
+.nav-tabs .nav-link { font-size: .9rem; border-bottom-width: 3px; }
+.nav-tabs .nav-link.active { border-bottom-color: var(--ink); font-weight: 600; }
+.alert-danger { --bs-alert-bg: var(--bad-bg); --bs-alert-color: var(--bad); --bs-alert-border-color: var(--bad); }
+.alert-success { --bs-alert-bg: var(--ok-bg); --bs-alert-color: var(--ok); --bs-alert-border-color: var(--ok); }
+:root.hc .btn-close { filter: invert(1); }
+.table { --bs-table-bg: transparent; --bs-table-color: var(--ink); --bs-table-border-color: var(--line); }
+.badge.text-bg-light { background-color: var(--surface) !important; color: var(--ink) !important; }
+
+/* app pieces */
+.flag-ok   { color: var(--ok);   background: var(--ok-bg);   border: 1px solid var(--ok); }
+.flag-bad  { color: var(--bad);  background: var(--bad-bg);  border: 1px solid var(--bad); }
+.flag-red  { color: var(--bad);  background: var(--bad-bg);  border: 1px solid var(--bad); }
+.flag-warn { color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn); }
+.seq { font-weight: 700; font-size: .8rem; color: var(--ink-soft); width: 1.4rem; text-align: center; flex-shrink: 0; }
+.att-toggle { min-width: 4.6rem; flex-shrink: 0; }
+.class-tabs { overflow-x: auto; flex-wrap: nowrap; padding-bottom: .25rem; -webkit-overflow-scrolling: touch; }
+.date-label { min-width: 11rem; font-size: .95rem; }
+.code-input { text-align: center; font-size: 1.3rem; letter-spacing: 3px; text-transform: uppercase; }
+.code-badge { font-size: 1.05rem; letter-spacing: 2px; padding: .4rem .8rem; background: var(--surface); color: var(--ink); }
+.cal-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
+.cal-btn { pointer-events: none; }
+
+/* print / PDF */
+#printReport { display: none; }
+#printReport table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; font-size: .9rem; }
+#printReport th, #printReport td { border: 1px solid #999; padding: 6px 8px; text-align: start; }
+@media print { body > *:not(#printReport) { display: none !important; } #printReport { display: block !important; background: #fff; color: #000; } }
