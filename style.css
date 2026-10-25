@@ -57,7 +57,7 @@ body { background: var(--bg); color: var(--ink); }
 .flag-red  { color: var(--bad);  background: var(--bad-bg);  border: 1px solid var(--bad); }
 .flag-warn { color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn); }
 .seq { font-weight: 700; font-size: .8rem; color: var(--ink-soft); width: 1.4rem; text-align: center; flex-shrink: 0; }
-.att-toggle { min-width: 4.6rem; flex-shrink: 0; }
+.att-toggle { min-width: 4rem; flex-shrink: 0; font-size: .8rem; padding-inline: .5rem; }
 .class-tabs { overflow-x: auto; flex-wrap: nowrap; padding-bottom: .25rem; -webkit-overflow-scrolling: touch; }
 .date-label { min-width: 11rem; font-size: .95rem; }
 .code-input { text-align: center; font-size: 1.3rem; letter-spacing: 3px; text-transform: uppercase; }
