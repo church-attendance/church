@@ -21,8 +21,8 @@ let state = {
   ready: false,
   members: [], attendance: {}, config: { classes: [], teacherPassword: '' },
   settings: { ...DEFAULT_SETTINGS },
-  teacherCode: null, role: 'teacher', pendingSync: false, syncStatus: '',
-  authMode: 'create', joinRole: 'teacher', joinCodeDraft: '', authError: '',
+  teacherCode: null, pendingSync: false, syncStatus: '',
+  authMode: 'create', joinCodeDraft: '', authError: '',
   screen: 'main', view: 'attend', selectedClass: 'all', selectedMemberId: null, selectedDate: null,
   search: '', sortDir: 'asc', adding: false, draft: { name: '', phone: '', parent: '', classId: null },
   welcomeMsg: '', importStatus: '', statusMsg: '', bulkFrom: '', bulkTo: ''
@@ -34,7 +34,6 @@ function t(key, ...a) {
   if (v === undefined) v = T.ar[key];
   return typeof v === 'function' ? v(...a) : v;
 }
-const isTeacher = () => state.role !== 'assistant';
 
 /* ================= dates (Fridays only) ================= */
 const pad = n => String(n).padStart(2, '0');
@@ -172,7 +171,6 @@ async function init() {
   state.settings = { ...DEFAULT_SETTINGS, ...load('settings', {}) };
   applyPrefs();
   state.teacherCode = load('teacherCode', null);
-  state.role = load('role', 'teacher');
   state.pendingSync = load('pendingSync', false);
   state.members = load('members', []);
   state.attendance = load('attendance', {});
@@ -195,11 +193,11 @@ async function createCode(pw, confirmPw) {
   const code = newCode(), cfg = { classes: [], teacherPassword: pw };
   try { await pushByCode(code, { app: APP_TAG, members: [], attendance: {}, config: cfg }); }
   catch (e) { return fail(t('createFail')); }
-  Object.assign(state, { teacherCode: code, role: 'teacher', members: [], attendance: {}, config: cfg, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', welcomeMsg: t('codeCreated', code) });
-  save('teacherCode', code); save('role', 'teacher'); save('pendingSync', false); persistLocal();
+  Object.assign(state, { teacherCode: code, members: [], attendance: {}, config: cfg, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', welcomeMsg: t('codeCreated', code) });
+  save('teacherCode', code); save('pendingSync', false); persistLocal();
   render();
 }
-async function joinCode(codeRaw, role, pw) {
+async function joinCode(codeRaw, pw) {
   const code = (codeRaw || '').trim().toUpperCase();
   if (!code) return fail(t('needCode'));
   let remote;
@@ -207,17 +205,17 @@ async function joinCode(codeRaw, role, pw) {
   if (!remote) return fail(t('codeNotFound'));
   if (remote.app !== APP_TAG) return fail(t('wrongApp'));
   const stored = (remote.config && remote.config.teacherPassword) || '';
-  if (role === 'teacher' && stored && (pw || '').trim() !== stored) return fail(t('wrongPassword'));
-  Object.assign(state, { teacherCode: code, role, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', joinCodeDraft: '' });
+  if (stored && (pw || '').trim() !== stored) return fail(t('wrongPassword'));
+  Object.assign(state, { teacherCode: code, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', joinCodeDraft: '' });
   applyRemote(remote);
-  save('teacherCode', code); save('role', role); save('pendingSync', false); persistLocal();
+  save('teacherCode', code); save('pendingSync', false); persistLocal();
   render();
 }
 function fail(msg) { state.authError = msg; render(); }
 function logout() {
   if (!confirm(state.pendingSync ? t('logoutPendingConfirm') : t('logoutConfirm'))) return;
   ['teacherCode', 'role', 'pendingSync', 'members', 'attendance', 'config'].forEach(k => localStorage.removeItem(PREFIX + k));
-  Object.assign(state, { teacherCode: null, role: 'teacher', pendingSync: false, members: [], attendance: {}, config: { classes: [], teacherPassword: '' }, screen: 'main', view: 'attend', selectedClass: 'all', adding: false, welcomeMsg: '', syncStatus: '' });
+  Object.assign(state, { teacherCode: null, pendingSync: false, members: [], attendance: {}, config: { classes: [], teacherPassword: '' }, screen: 'main', view: 'attend', selectedClass: 'all', adding: false, welcomeMsg: '', syncStatus: '' });
   render();
 }
 
@@ -364,8 +362,7 @@ function viewAuth() {
       '<button class="btn btn-dark w-100" data-act="create-code">' + esc(t('createCodeBtn')) + '</button>'
     : '<p class="small text-secondary mb-2">' + esc(t('joinHint')) + '</p>' +
       '<div class="mb-3"><input id="joinCode" class="form-control form-control-sm code-input" type="text" maxlength="6" placeholder="ABC123" autocapitalize="characters" value="' + esc(state.joinCodeDraft) + '" data-draft="code" data-enter="join-code"></div>' +
-      '<div class="d-flex flex-wrap gap-2 mb-3">' + btnPill(state.joinRole !== 'assistant', 'join-role', 'data-role="teacher"', esc(t('roleTeacher'))) + btnPill(state.joinRole === 'assistant', 'join-role', 'data-role="assistant"', esc(t('roleAssistant'))) + '</div>' +
-      (state.joinRole !== 'assistant' ? '<div class="mb-3"><label class="form-label small text-secondary">' + esc(t('password')) + '</label><input id="joinPw" class="form-control form-control-sm" type="password" data-enter="join-code"></div>' : '') +
+      '<div class="mb-3"><label class="form-label small text-secondary">' + esc(t('password')) + '</label><input id="joinPw" class="form-control form-control-sm" type="password" autocomplete="current-password" data-enter="join-code"></div>' +
       '<button class="btn btn-dark w-100" data-act="join-code">' + esc(t('joinBtn')) + '</button>';
   return '<div class="mx-auto my-4 auth-wrap"><div class="d-flex justify-content-center gap-2 mb-3">' + langBtns() + '</div>' +
     '<div class="card card-body p-4"><h1 class="h4 text-center fw-bold mb-1">' + esc(t('appTitle')) + '</h1><p class="text-center small text-secondary mb-3">' + esc(t('appSub')) + '</p>' +
@@ -388,9 +385,7 @@ function viewMain() {
 }
 function viewNoClasses() {
   return '<div class="card card-body text-center py-4"><h2 class="h6 fw-semibold">' + esc(t('noClassesTitle')) + '</h2>' +
-    (isTeacher()
-      ? '<p class="small text-secondary">' + esc(t('noClassesHint')) + '</p><div class="d-flex gap-2"><input id="firstClass" class="form-control form-control-sm" placeholder="' + esc(t('classNamePh')) + '" data-enter="add-class-first"><button class="btn btn-sm btn-dark text-nowrap" data-act="add-class-first">' + esc(t('addClass')) + '</button></div>'
-      : '<p class="small text-secondary mb-0">' + esc(t('noClassesAssistant')) + '</p>') + '</div>';
+    '<p class="small text-secondary">' + esc(t('noClassesHint')) + '</p><div class="d-flex gap-2"><input id="firstClass" class="form-control form-control-sm" placeholder="' + esc(t('classNamePh')) + '" data-enter="add-class-first"><button class="btn btn-sm btn-dark text-nowrap" data-act="add-class-first">' + esc(t('addClass')) + '</button></div></div>';
 }
 function viewAddForm() {
   const d = state.draft;
@@ -463,28 +458,27 @@ function viewDetail() {
       (s.total ? '<div class="d-flex flex-wrap gap-2 mb-2"><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('mass')) + ' ' + s.mass + '/' + s.total + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('meeting')) + ' ' + s.meeting + '/' + s.total + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + s.pct + '%</span></div>' +
         '<ul class="list-group list-group-flush border-top">' + rows.map(d => '<li class="list-group-item d-flex align-items-center gap-2 px-1 small"><span class="flex-grow-1">' + esc(fmtDate(d)) + '</span>' + flag(attended(m.id, d, 'mass'), t('mass')) + flag(attended(m.id, d, 'meeting'), t('meeting')) + '</li>').join('') + '</ul>'
         : '<p class="small text-secondary mb-0">' + esc(t('noRecorded')) + '</p>') + '</div>' +
-    (isTeacher() ? '<button class="btn btn-sm btn-outline-danger" data-act="delete-member" data-id="' + esc(m.id) + '">' + esc(t('deleteMember')) + '</button>' : '');
+    '<button class="btn btn-sm btn-outline-danger" data-act="delete-member" data-id="' + esc(m.id) + '">' + esc(t('deleteMember')) + '</button>';
 }
 
 function viewSettings() {
   const sec = (title, body, last) => '<div class="' + (last ? 'mb-3' : 'mb-3 pb-3 border-bottom') + '"><h3 class="h6 fw-semibold">' + esc(title) + '</h3>' + body + '</div>';
   const classOpts = (withNone, sel) => '<option value="">—</option>' + classes().map(c => '<option value="' + esc(c.id) + '"' + (sel === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + (withNone ? '<option value="none"' + (sel === 'none' ? ' selected' : '') + '>' + esc(t('noClass')) + '</option>' : '');
   let h = '<button class="btn btn-sm btn-outline-dark mb-3" data-act="back">' + esc(t('back')) + '</button><div id="syncBanner"></div><h2 class="h4 fw-bold mb-3">' + esc(t('settings')) + '</h2>';
-  h += sec(t('accountTitle'), '<p class="small text-secondary mb-1">' + esc(t('codeLabel')) + '</p><div class="d-flex flex-wrap align-items-center gap-2"><span class="badge border fw-normal code-badge">' + esc(state.teacherCode || '') + '</span>' + (isTeacher() ? '' : '<span class="badge rounded-pill flag-warn">' + esc(t('roleAssistant')) + '</span>') + '<button class="btn btn-sm btn-outline-dark" data-act="copy-code">' + esc(t('copyCode')) + '</button></div>' +
+  h += sec(t('accountTitle'), '<p class="small text-secondary mb-1">' + esc(t('codeLabel')) + '</p><div class="d-flex flex-wrap align-items-center gap-2"><span class="badge border fw-normal code-badge">' + esc(state.teacherCode || '') + '</span>' + '<button class="btn btn-sm btn-outline-dark" data-act="copy-code">' + esc(t('copyCode')) + '</button></div>' +
     '<p id="syncStatusLine" class="small text-secondary mt-1 mb-0"></p><div class="d-flex flex-wrap gap-2 mt-2"><button class="btn btn-sm btn-outline-dark" data-act="sync-now">' + esc(t('syncNow')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="logout">' + esc(t('logout')) + '</button></div>');
-  if (isTeacher()) h += sec(t('passwordTitle'), '<p class="small text-secondary">' + esc(t('passwordHint')) + '</p><div class="d-flex gap-2"><input id="newTeacherPw" class="form-control form-control-sm" type="password" placeholder="' + esc(t('password')) + '" data-enter="save-password"><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="save-password">' + esc(t('save')) + '</button></div>');
+  h += sec(t('passwordTitle'), '<p class="small text-secondary">' + esc(t('passwordHint')) + '</p><div class="d-flex gap-2"><input id="newTeacherPw" class="form-control form-control-sm" type="password" placeholder="' + esc(t('password')) + '" data-enter="save-password"><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="save-password">' + esc(t('save')) + '</button></div>');
   h += sec(t('languageTitle'), '<div class="d-flex flex-wrap gap-2">' + langBtns() + '</div>');
   h += sec(t('fontTitle'), '<div class="d-flex flex-wrap gap-2">' + ['small', 'medium', 'large'].map(k => btnPill(state.settings.fontSize === k, 'font', 'data-size="' + k + '"', esc(t(k)))).join('') + '</div><label class="d-flex align-items-center gap-2 small mt-2"><input class="form-check-input mt-0" type="checkbox" ' + (state.settings.highContrast ? 'checked' : '') + ' data-change="contrast"> ' + esc(t('highContrast')) + '</label>');
-  if (isTeacher()) {
+  {
     h += sec(t('classesTitle'), '<p class="small text-secondary">' + esc(t('classesHint')) + '</p>' +
       (classes().length ? '<ul class="list-group list-group-flush mb-2">' + classes().map(c => '<li class="list-group-item d-flex gap-2 px-0"><input class="form-control form-control-sm" value="' + esc(c.name) + '" data-change="rename-class" data-id="' + esc(c.id) + '"><button class="btn btn-sm btn-outline-danger" data-act="delete-class" data-id="' + esc(c.id) + '" aria-label="' + esc(t('delete')) + '">&times;</button></li>').join('') + '</ul>' : '') +
       '<div class="d-flex gap-2"><input id="newClass" class="form-control form-control-sm" placeholder="' + esc(t('classNamePh')) + '" data-enter="add-class"><button class="btn btn-sm btn-dark text-nowrap" data-act="add-class">' + esc(t('addClass')) + '</button></div>');
     h += sec(t('bulkTitle'), '<p class="small text-secondary">' + esc(t('bulkHint')) + '</p><div class="d-flex gap-2 align-items-center"><select id="bulkFrom" class="form-select form-select-sm">' + classOpts(true, state.bulkFrom) + '</select><span>&#8594;</span><select id="bulkTo" class="form-select form-select-sm">' + classOpts(true, state.bulkTo) + '</select><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="bulk-move">' + esc(t('bulkBtn')) + '</button></div>' + (state.statusMsg ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.statusMsg) + '</p>' : ''));
   }
   h += sec(t('importTitle'), '<p class="small text-secondary">' + esc(t('importHint')) + '</p><input id="importFile" type="file" accept=".xlsx,.xls,.csv" class="d-none" data-change="import"><div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="import-pick">' + esc(t('importBtn')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="template">' + esc(t('templateBtn')) + '</button></div>' + (state.importStatus ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.importStatus) + '</p>' : ''));
-  h += sec(t('exportTitle'), '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="export-summary">' + esc(t('exportSummary')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-matrix">' + esc(t('exportMatrix')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="print">' + esc(t('printBtn')) + '</button></div>', !isTeacher());
-  if (isTeacher()) h += sec(t('deleteAllTitle'), '<p class="small text-secondary">' + esc(t('deleteAllHint')) + '</p><button class="btn btn-sm btn-outline-danger" data-act="delete-all">' + esc(t('deleteAllBtn')) + '</button>', true);
-  else h += '<p class="small text-secondary">' + esc(t('teacherOnly')) + '</p>';
+  h += sec(t('exportTitle'), '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="export-summary">' + esc(t('exportSummary')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-matrix">' + esc(t('exportMatrix')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="print">' + esc(t('printBtn')) + '</button></div>');
+  h += sec(t('deleteAllTitle'), '<p class="small text-secondary">' + esc(t('deleteAllHint')) + '</p><button class="btn btn-sm btn-outline-danger" data-act="delete-all">' + esc(t('deleteAllBtn')) + '</button>', true);
   return h;
 }
 
@@ -504,9 +498,8 @@ function act(name, el) {
   switch (name) {
     case 'lang': return setPrefs({ lang: d.lang });
     case 'auth-mode': state.authMode = d.mode; state.authError = ''; return render();
-    case 'join-role': state.joinRole = d.role; state.authError = ''; return render();
     case 'create-code': return createCode(val('newPw'), val('newPw2'));
-    case 'join-code': return joinCode(val('joinCode'), state.joinRole, val('joinPw'));
+    case 'join-code': return joinCode(val('joinCode'), val('joinPw'));
     case 'logout': return logout();
     case 'settings': state.screen = 'settings'; state.statusMsg = ''; return render();
     case 'back': state.screen = 'main'; return render();
@@ -535,7 +528,7 @@ function act(name, el) {
     case 'font': return setPrefs({ fontSize: d.size });
     case 'copy-code': if (navigator.clipboard) navigator.clipboard.writeText(state.teacherCode).then(() => { state.syncStatus = t('codeCopied'); refreshSyncUI(); }); return;
     case 'sync-now': state.syncStatus = t('syncing'); refreshSyncUI(); return pushNow();
-    case 'save-password': { const p = val('newTeacherPw').trim(); if (!p || !isTeacher()) return; state.config.teacherPassword = p; persist(); state.syncStatus = t('passwordSaved'); render(); return; }
+    case 'save-password': { const p = val('newTeacherPw').trim(); if (!p) return; state.config.teacherPassword = p; persist(); state.syncStatus = t('passwordSaved'); render(); return; }
     case 'import-pick': return $('#importFile').click();
     case 'template': return templateCSV();
     case 'export-summary': return exportSummary();
@@ -566,7 +559,7 @@ document.addEventListener('change', e => {
   switch (d.change) {
     case 'date-pick': if (el.value) { state.selectedDate = lastFriday(el.value > latestFriday() ? latestFriday() : el.value); render(); } break;
     case 'contact': { const m = state.members.find(x => x.id === d.id); if (m) { m[d.field] = el.value.trim(); persist(); render(); } break; }
-    case 'rename-class': if (isTeacher()) renameClass(d.id, el.value); break;
+    case 'rename-class': renameClass(d.id, el.value); break;
     case 'contrast': setPrefs({ highContrast: el.checked }); break;
     case 'import': importFile(el); break;
   }
