@@ -4,10 +4,15 @@ const MONTH_NAMES = {
   en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 };
 
+const DAY_NAMES = {
+  ar: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
+  en: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+};
+
 const T = {
   ar: {
-    appTitle: 'حضور الفصول', appSub: 'قداس + اجتماع كل جمعة', loading: 'جارِ التحميل…',
-    friday: 'الجمعة', mass: 'قداس', meeting: 'اجتماع', both: 'قداس + اجتماع',
+    appTitle: 'حضور الفصول', appSub: 'قداس + اجتماع كل أسبوع', loading: 'جارِ التحميل…',
+    mass: 'قداس', meeting: 'اجتماع', both: 'قداس + اجتماع',
     // sign-in
     newCodeTab: 'إنشاء كود جديد', joinCodeTab: 'الانضمام بكود',
     newCodeHint: 'أول مرة؟ أنشئ كودًا خاصًا بخدمتك، واختر كلمة مرور — ستُطلب عند ربط أي جهاز جديد.',
@@ -25,28 +30,31 @@ const T = {
     classNamePh: 'اسم الفصل (مثال: أولى ابتدائي)', addClass: 'إضافة فصل',
     namePh: 'اسم العضو', phoneLabel: 'رقم الهاتف', parentLabel: 'رقم هاتف ولي الأمر', addMember: 'إضافة العضو',
     searchPh: 'بحث', sortAsc: 'أ ← ي', sortDesc: 'ي ← أ', emptyList: 'لا يوجد أعضاء في هذا الفصل.',
-    fridayOnly: 'الحضور يُسجَّل أيام الجمعة فقط', goLatest: 'آخر جمعة', pickDate: 'اختيار تاريخ',
+    daysNote: (a, b) => a === b ? 'الحضور يُسجَّل يوم ' + a + ' فقط' : 'القداس يوم ' + a + ' — الاجتماع يوم ' + b, goLatest: 'آخر أسبوع', notYet: 'لم يحن موعده بعد', pickDate: 'اختيار تاريخ',
     // report
-    colName: 'الاسم', colClass: 'الفصل', colMass: 'قداس', colMeeting: 'اجتماع', colPct: 'النسبة', colStreak: 'غياب متتالي', colFridays: 'عدد الجمعات',
-    fridaysCount: n => 'عدد الجمعات المسجلة: ' + n, noRecorded: 'لم يتم تسجيل أي جمعة بعد.',
-    streakHint: n => 'يظهر بالأحمر من غاب ' + n + ' جمعات متتالية أو أكثر (للافتقاد).',
+    colName: 'الاسم', colClass: 'الفصل', colMass: 'قداس', colMeeting: 'اجتماع', colPct: 'النسبة', colStreak: 'غياب متتالي', colWeeks: 'عدد الأسابيع',
+    weeksCount: n => 'عدد الأسابيع المسجلة: ' + n, noRecorded: 'لم يتم تسجيل أي أسبوع بعد.',
+    streakHint: n => 'يظهر بالأحمر من غاب ' + n + ' أسابيع متتالية أو أكثر (للافتقاد).',
     // detail
-    classSection: 'الفصل', contactSection: 'معلومات التواصل', noNumber: 'بدون رقم', call: 'اتصال', historySection: 'سجل الجمع',
+    infoSection: 'بيانات إضافية', addressLabel: 'العنوان', confessorLabel: 'أب الاعتراف', confessorPh: 'اسم أب الاعتراف', birthdayLabel: 'عيد الميلاد',
+    birthdayMonth: 'عيد ميلاده هذا الشهر', birthdayOn: d => 'عيد ميلاده: ' + d, exampleBirthday: '15/11/2012',
+    classSection: 'الفصل', contactSection: 'معلومات التواصل', noNumber: 'بدون رقم', call: 'اتصال', historySection: 'سجل الحضور',
     deleteMember: 'حذف هذا العضو', deleteMemberConfirm: n => 'حذف «' + n + '» نهائيًا مع سجل حضوره؟',
     // settings
     accountTitle: 'الحساب', codeLabel: 'كود الخدمة:', copyCode: 'نسخ الكود', codeCopied: 'تم نسخ الكود ✓', syncNow: 'مزامنة الآن', logout: 'تسجيل خروج',
     logoutConfirm: 'تسجيل الخروج يمسح بيانات هذا الجهاز (تبقى محفوظة على السحابة). متأكد؟',
     logoutPendingConfirm: 'تنبيه: يوجد تغييرات لم تُرفع بعد (لا يوجد إنترنت). لو سجلت الخروج الآن ستضيع. متأكد؟',
     passwordTitle: 'كلمة المرور', passwordHint: 'مطلوبة عند ربط أي جهاز جديد بالكود.', passwordSaved: 'تم حفظ كلمة المرور ✓',
+    daysTitle: 'أيام القداس والاجتماع', daysHint: 'اختر اليوم الذي يُقام فيه كل منهما (يمكن أن يكونا يومًا واحدًا). تغيير الأيام لا يمسح السجل القديم.', massDayLabel: 'يوم القداس', meetingDayLabel: 'يوم الاجتماع',
     languageTitle: 'اللغة', fontTitle: 'حجم الخط', small: 'صغير', medium: 'متوسط', large: 'كبير', highContrast: 'وضع تباين عالٍ (أوضح للعين)',
     classesTitle: 'الفصول', classesHint: 'عدّل الاسم مباشرة، أو احذف الفصل (يصبح أعضاؤه «بدون فصل»).',
     deleteClassConfirm: (c, n) => 'حذف فصل «' + c + '»؟ سيصبح أعضاؤه (' + n + ') بدون فصل.',
     bulkTitle: 'نقل فصل كامل (ترقية السنة)', bulkHint: 'انقل كل أعضاء فصل إلى فصل آخر مرة واحدة.', bulkBtn: 'نقل', bulkDone: n => 'تم نقل ' + n + ' عضو ✓',
-    importTitle: 'استيراد من Excel', importHint: 'ملف Excel أو CSV بأعمدة: الاسم، الفصل، رقم الهاتف، رقم هاتف ولي الأمر. الفصول الجديدة تُنشأ تلقائيًا.',
+    importTitle: 'استيراد من Excel', importHint: 'ملف Excel أو CSV بأعمدة: الاسم، الفصل، رقم الهاتف، رقم هاتف ولي الأمر، العنوان، أب الاعتراف، عيد الميلاد (يوم/شهر/سنة). الفصول الجديدة تُنشأ تلقائيًا.',
     importBtn: 'اختيار ملف واستيراد', templateBtn: 'تنزيل نموذج فارغ', importing: 'جارِ الاستيراد…',
     importDone: (n, s) => 'تم استيراد ' + n + ' عضو' + (s ? ' (تخطي ' + s + ' مكرر)' : '') + ' ✓', importFail: 'فشل الاستيراد، تأكد من الملف ومن الإنترنت.',
     exampleName: 'مثال: مينا جرجس', exampleClass: 'أولى ابتدائي',
-    exportTitle: 'تصدير', exportSummary: 'ملخص (Excel)', exportMatrix: 'حسب كل جمعة (Excel)', printBtn: 'طباعة / PDF',
+    exportTitle: 'تصدير', exportSummary: 'ملخص (Excel)', exportMatrix: 'حسب كل أسبوع (Excel)', printBtn: 'طباعة / PDF',
     deleteAllTitle: 'بداية سنة جديدة', deleteAllHint: 'يحذف كل الأعضاء وسجل الحضور نهائيًا (الفصول تبقى).', deleteAllBtn: 'حذف الأعضاء والحضور',
     deleteAllConfirm: 'هل أنت متأكد؟ سيتم حذف كل الأعضاء وسجل الحضور نهائيًا ولا يمكن التراجع.',
     // sync
@@ -54,8 +62,8 @@ const T = {
     pendingSyncBanner: 'غير متصل — تغييراتك محفوظة وسيتم رفعها تلقائيًا عند عودة الإنترنت.'
   },
   en: {
-    appTitle: 'Class Attendance', appSub: 'Mass + meeting every Friday', loading: 'Loading…',
-    friday: 'Friday', mass: 'Mass', meeting: 'Meeting', both: 'Mass + meeting',
+    appTitle: 'Class Attendance', appSub: 'Mass + meeting every week', loading: 'Loading…',
+    mass: 'Mass', meeting: 'Meeting', both: 'Mass + meeting',
     newCodeTab: 'Create new code', joinCodeTab: 'Join with code',
     newCodeHint: 'First time? Create a code for your ministry and choose a password — it is asked on every new device.',
     joinHint: 'Enter the code and password to link this device to the same data.',
@@ -71,25 +79,28 @@ const T = {
     classNamePh: 'Class name (e.g. Grade 1)', addClass: 'Add class',
     namePh: 'Member name', phoneLabel: 'Phone number', parentLabel: 'Parent phone number', addMember: 'Add member',
     searchPh: 'Search', sortAsc: 'A → Z', sortDesc: 'Z → A', emptyList: 'No members in this class.',
-    fridayOnly: 'Attendance is recorded on Fridays only', goLatest: 'Latest Friday', pickDate: 'Pick a date',
-    colName: 'Name', colClass: 'Class', colMass: 'Mass', colMeeting: 'Meeting', colPct: 'Rate', colStreak: 'Missed in a row', colFridays: 'Fridays',
-    fridaysCount: n => 'Fridays recorded: ' + n, noRecorded: 'No Friday has been recorded yet.',
-    streakHint: n => 'Shown in red when someone missed ' + n + ' or more Fridays in a row (for follow-up).',
-    classSection: 'Class', contactSection: 'Contact info', noNumber: 'No number', call: 'Call', historySection: 'Friday history',
+    daysNote: (a, b) => a === b ? 'Attendance is recorded on ' + a + ' only' : 'Mass on ' + a + ' — meeting on ' + b, goLatest: 'Latest week', notYet: 'Has not happened yet', pickDate: 'Pick a date',
+    colName: 'Name', colClass: 'Class', colMass: 'Mass', colMeeting: 'Meeting', colPct: 'Rate', colStreak: 'Missed in a row', colWeeks: 'Weeks',
+    weeksCount: n => 'Weeks recorded: ' + n, noRecorded: 'No week has been recorded yet.',
+    streakHint: n => 'Shown in red when someone missed ' + n + ' or more weeks in a row (for follow-up).',
+    infoSection: 'More info', addressLabel: 'Address', confessorLabel: 'Confession father', confessorPh: 'Name of confession father', birthdayLabel: 'Birthday',
+    birthdayMonth: 'Birthday this month', birthdayOn: d => 'Birthday: ' + d, exampleBirthday: '15/11/2012',
+    classSection: 'Class', contactSection: 'Contact info', noNumber: 'No number', call: 'Call', historySection: 'Attendance history',
     deleteMember: 'Delete this member', deleteMemberConfirm: n => 'Permanently delete "' + n + '" and their attendance?',
     accountTitle: 'Account', codeLabel: 'Ministry code:', copyCode: 'Copy code', codeCopied: 'Code copied ✓', syncNow: 'Sync now', logout: 'Log out',
     logoutConfirm: 'Logging out clears the data on this device (it stays safe in the cloud). Sure?',
     logoutPendingConfirm: 'Warning: some changes have not uploaded yet (no internet). Logging out now will lose them. Sure?',
     passwordTitle: 'Password', passwordHint: 'Required to link any new device to the code.', passwordSaved: 'Password saved ✓',
+    daysTitle: 'Mass and meeting days', daysHint: 'Choose the day each one is held (they can be the same day). Changing the days does not erase old records.', massDayLabel: 'Mass day', meetingDayLabel: 'Meeting day',
     languageTitle: 'Language', fontTitle: 'Text size', small: 'Small', medium: 'Medium', large: 'Large', highContrast: 'High contrast mode',
     classesTitle: 'Classes', classesHint: 'Edit a name directly, or delete a class (its members become "No class").',
     deleteClassConfirm: (c, n) => 'Delete class "' + c + '"? Its ' + n + ' member(s) will have no class.',
     bulkTitle: 'Move a whole class (year promotion)', bulkHint: 'Move every member of one class into another at once.', bulkBtn: 'Move', bulkDone: n => 'Moved ' + n + ' member(s) ✓',
-    importTitle: 'Import from Excel', importHint: 'An Excel or CSV file with columns: Name, Class, Phone number, Parent phone number. New classes are created automatically.',
+    importTitle: 'Import from Excel', importHint: 'An Excel or CSV file with columns: Name, Class, Phone number, Parent phone number, Address, Confession father, Birthday (day/month/year). New classes are created automatically.',
     importBtn: 'Choose file & import', templateBtn: 'Download blank template', importing: 'Importing…',
     importDone: (n, s) => 'Imported ' + n + ' member(s)' + (s ? ' (skipped ' + s + ' duplicates)' : '') + ' ✓', importFail: 'Import failed, check the file and your internet.',
     exampleName: 'e.g. Mina Gerges', exampleClass: 'Grade 1',
-    exportTitle: 'Export', exportSummary: 'Summary (Excel)', exportMatrix: 'By Friday (Excel)', printBtn: 'Print / PDF',
+    exportTitle: 'Export', exportSummary: 'Summary (Excel)', exportMatrix: 'By week (Excel)', printBtn: 'Print / PDF',
     deleteAllTitle: 'New year', deleteAllHint: 'Permanently deletes all members and attendance (classes stay).', deleteAllBtn: 'Delete members & attendance',
     deleteAllConfirm: 'Are you sure? All members and attendance will be permanently deleted.',
     syncing: 'Syncing…', syncSuccess: 'Synced ✓', offlineSaved: 'Saved on this device, will upload automatically once you are online.',

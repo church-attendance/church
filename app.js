@@ -41,10 +41,62 @@ const toISO = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.g
 const parseISO = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const todayISO = () => toISO(new Date());
 function addDays(s, n) { const d = parseISO(s); d.setDate(d.getDate() + n); return toISO(d); }
-function lastFriday(s) { const d = parseISO(s); d.setDate(d.getDate() - ((d.getDay() - 5 + 7) % 7)); return toISO(d); }
-const latestFriday = () => lastFriday(todayISO());      // newest Friday that can be recorded
-function fmtDate(s) { const d = parseISO(s); return t('friday') + (lang() === 'ar' ? '، ' : ', ') + d.getDate() + ' ' + MONTH_NAMES[lang()][d.getMonth()] + ' ' + d.getFullYear(); }
+/* ---- service days: the mass day and the meeting day are settings (default: both on Friday) ----
+   A "week" is identified by its mass date (the anchor). The meeting of that week is the occurrence of the meeting
+   weekday closest to the mass date (up to 3 days before or after), so one week = one mass + one meeting. */
+const massDay = () => (state.config.massDay != null ? +state.config.massDay : 5);
+const meetingDay = () => (state.config.meetingDay != null ? +state.config.meetingDay : 5);
+const meetingOffset = () => ((((meetingDay() - massDay() + 3) % 7) + 7) % 7) - 3;      // -3 … +3 days from the mass
+const lastOn = (s, wd) => { const d = parseISO(s); d.setDate(d.getDate() - ((d.getDay() - wd + 7) % 7)); return toISO(d); };
+const meetingDateOf = w => addDays(w, meetingOffset());
+function weekOf(d) {                 // which week (anchor) a recorded date belongs to
+  const wd = parseISO(d).getDay();
+  if (wd === massDay()) return d;
+  if (wd === meetingDay()) return addDays(d, -meetingOffset());
+  return lastOn(d, massDay());       // a date recorded under older day settings
+}
+function latestAnchor() {            // newest week that has already started (its mass or meeting date has come)
+  const now = todayISO();
+  let a = addDays(lastOn(now, massDay()), 7);
+  while (a > now && meetingDateOf(a) > now) a = addDays(a, -7);
+  return a;
+}
+function firstWeekFrom(s) {          // first week that was not completely over when someone joined
+  let a = addDays(lastOn(s, massDay()), -7);
+  while (a < s && meetingDateOf(a) < s) a = addDays(a, 7);
+  return a;
+}
+function normalizeSelected() { const cap = latestAnchor(), w = weekOf(state.selectedDate || cap); state.selectedDate = w > cap ? cap : w; }
+const dayName = d => DAY_NAMES[lang()][parseISO(d).getDay()];
+function fmtDay(s) { const d = parseISO(s); return dayName(s) + (lang() === 'ar' ? '، ' : ', ') + d.getDate() + ' ' + MONTH_NAMES[lang()][d.getMonth()] + ' ' + d.getFullYear(); }
+function fmtWeek(w) { const m = meetingDateOf(w); return meetingOffset() === 0 ? fmtDay(w) : fmtDay(w) + ' / ' + dayName(m) + ' ' + fmtShort(m); }
 function fmtShort(s) { const d = parseISO(s); return d.getDate() + ' ' + MONTH_NAMES[lang()][d.getMonth()]; }
+
+/* ---- birthdays: stored as YYYY-MM-DD; a 🎂 shows beside the name during the member's birthday month ---- */
+const toLatin = s => String(s).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+function validISO(y, m, d) {
+  y = +y; m = +m; d = +d;
+  const dt = new Date(y, m - 1, d);
+  return y >= 1900 && dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d ? y + '-' + pad(m) + '-' + pad(d) : '';
+}
+function parseBirthday(v) {          // accepts a date input value, 15/11/2012, 2012-11-15, Arabic digits, or an Excel date number
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return validISO(v.getFullYear(), v.getMonth() + 1, v.getDate());
+  if (typeof v === 'number') {
+    if (v < 1 || v > 80000) return '';
+    const d = new Date(Math.round((v - 25569) * 864e5));
+    return validISO(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+  }
+  const s = toLatin(v).trim();
+  if (/^\d{5}$/.test(s)) return parseBirthday(Number(s));      // an Excel date that arrived as text
+  let m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
+  if (m) return validISO(m[1], m[2], m[3]);
+  m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/);
+  if (m) { let y = +m[3]; if (y < 100) y += y > 30 ? 1900 : 2000; return validISO(y, m[2], m[1]); }
+  return '';
+}
+const birthdayThisMonth = m => !!m.birthday && /^\d{4}-\d{2}-\d{2}$/.test(m.birthday) && parseISO(m.birthday).getMonth() === new Date().getMonth();
+const cake = m => birthdayThisMonth(m) ? ' <span class="cake" title="' + esc(t('birthdayMonth')) + '">&#127874;</span>' : '';
 
 /* ================= classes, members, attendance ================= */
 const classes = () => state.config.classes;
@@ -55,40 +107,60 @@ function membersIn(sel) {
   return state.members.filter(m => sel === 'all' ? true : sel === 'none' ? !hasClass(m) : m.classId === sel);
 }
 const sortByName = list => list.slice().sort((a, b) => a.name.localeCompare(b.name, 'ar') * (state.sortDir === 'asc' ? 1 : -1));
-const dayRec = d => { const r = state.attendance[d] || {}; return { mass: [...(r.mass || [])], meeting: [...(r.meeting || [])] }; };
-const attended = (id, d, kind) => { const r = state.attendance[d]; return !!(r && (r[kind] || []).includes(id)); };
+// who attended each week, merged across every recorded date that belongs to that week
+function buildWeeks() {
+  const map = new Map();
+  Object.keys(state.attendance).forEach(d => {
+    const r = state.attendance[d], w = weekOf(d);
+    let e = map.get(w);
+    if (!e) { e = { mass: new Set(), meeting: new Set(), dates: [] }; map.set(w, e); }
+    (r.mass || []).forEach(i => e.mass.add(i)); (r.meeting || []).forEach(i => e.meeting.add(i)); e.dates.push(d);
+  });
+  return map;
+}
+const EMPTY_WEEK = { mass: new Set(), meeting: new Set(), dates: [] };
+const attendedW = (weeks, id, w, kind) => { const e = weeks.get(w); return !!(e && e[kind].has(id)); };
 
 function toggleAtt(id, kind) {
-  const d = state.selectedDate, r = dayRec(d), i = r[kind].indexOf(id);
-  if (i >= 0) r[kind].splice(i, 1); else r[kind].push(id);
-  if (!r.mass.length && !r.meeting.length) delete state.attendance[d]; else state.attendance[d] = r;
+  const w = state.selectedDate, e = buildWeeks().get(w);
+  if (e && e[kind].has(id)) {                       // un-tick: remove it from every date of this week
+    e.dates.forEach(d => {
+      const r = state.attendance[d]; r[kind] = (r[kind] || []).filter(i => i !== id);
+      if (!(r.mass || []).length && !(r.meeting || []).length) delete state.attendance[d];
+    });
+  } else {
+    const d = kind === 'mass' ? w : meetingDateOf(w);
+    if (d > todayISO()) return;                      // something that has not happened yet cannot be recorded
+    const r = state.attendance[d] || { mass: [], meeting: [] };
+    r.mass = r.mass || []; r.meeting = r.meeting || [];
+    r[kind].push(id); state.attendance[d] = r;
+  }
   persist(); render();
 }
-// Fridays on which at least one of these members was recorded
-function datesFor(ids) {
-  const set = new Set(ids);
-  return Object.keys(state.attendance).filter(d => {
-    const r = state.attendance[d];
-    return (r.mass || []).some(i => set.has(i)) || (r.meeting || []).some(i => set.has(i));
-  }).sort();
+// weeks (anchors, oldest first) in which at least one of these members was recorded
+function datesFor(ids, weeks) {
+  const set = new Set(ids), out = [];
+  weeks.forEach((e, w) => { if ([...e.mass].some(i => set.has(i)) || [...e.meeting].some(i => set.has(i))) out.push(w); });
+  return out.sort();
 }
-function statsFor(m, dates) {
-  // a member only counts Fridays from the week they were added (or any Friday they actually attended)
-  const since = m.addedAt ? lastFriday(m.addedAt) : '0000-00-00';
-  const mine = dates.filter(d => d >= since || attended(m.id, d, 'mass') || attended(m.id, d, 'meeting'));
+function statsFor(m, dates, weeks) {
+  // a member only counts the weeks from when they joined (or any week they actually attended)
+  const since = m.addedAt ? firstWeekFrom(m.addedAt) : '0000-00-00';
+  const a = (w, k) => attendedW(weeks, m.id, w, k);
+  const mine = dates.filter(w => w >= since || a(w, 'mass') || a(w, 'meeting'));
   let mass = 0, meeting = 0, streak = 0;
-  mine.forEach(d => { if (attended(m.id, d, 'mass')) mass++; if (attended(m.id, d, 'meeting')) meeting++; });
+  mine.forEach(w => { if (a(w, 'mass')) mass++; if (a(w, 'meeting')) meeting++; });
   for (let i = mine.length - 1; i >= 0; i--) {
-    if (attended(m.id, mine[i], 'mass') || attended(m.id, mine[i], 'meeting')) break;
+    if (a(mine[i], 'mass') || a(mine[i], 'meeting')) break;
     streak++;
   }
   const total = mine.length;
   return { mass, meeting, total, streak, pct: total ? Math.round(100 * (mass + meeting) / (2 * total)) : 0, dates: mine };
 }
 function reportRows(sel) {
-  const ms = sortByName(membersIn(sel));
-  const dates = datesFor(ms.map(m => m.id));
-  return { dates, rows: ms.map(m => ({ m, ...statsFor(m, dates) })) };
+  const weeks = buildWeeks(), ms = sortByName(membersIn(sel));
+  const dates = datesFor(ms.map(m => m.id), weeks);
+  return { dates, weeks, rows: ms.map(m => ({ m, ...statsFor(m, dates, weeks) })) };
 }
 
 /* ================= storage + cloud sync ================= */
@@ -115,6 +187,7 @@ function applyRemote(r) {
   state.attendance = r.attendance || {};
   state.config = { classes: [], teacherPassword: '', ...(r.config || {}) };
   if (!['all', 'none'].includes(state.selectedClass) && !classById(state.selectedClass)) state.selectedClass = 'all';
+  normalizeSelected();
 }
 function markPending(p) { state.pendingSync = p; save('pendingSync', p); refreshSyncUI(); }
 function refreshSyncUI() {
@@ -175,7 +248,7 @@ async function init() {
   state.members = load('members', []);
   state.attendance = load('attendance', {});
   state.config = { classes: [], teacherPassword: '', ...load('config', {}) };
-  state.selectedDate = latestFriday();
+  state.selectedDate = latestAnchor();
   state.ready = true; render();
   if (state.teacherCode) {
     if (state.pendingSync) { await pushNow(); }
@@ -190,7 +263,7 @@ async function createCode(pw, confirmPw) {
   pw = (pw || '').trim();
   if (!pw) return fail(t('needPassword'));
   if (pw !== confirmPw) return fail(t('passwordMismatch'));
-  const code = newCode(), cfg = { classes: [], teacherPassword: pw };
+  const code = newCode(), cfg = { classes: [], teacherPassword: pw, massDay: 5, meetingDay: 5 };
   try { await pushByCode(code, { app: APP_TAG, members: [], attendance: {}, config: cfg }); }
   catch (e) { return fail(t('createFail')); }
   Object.assign(state, { teacherCode: code, members: [], attendance: {}, config: cfg, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', welcomeMsg: t('codeCreated', code) });
@@ -280,33 +353,33 @@ function download(name, text, type) {
 const csvCell = v => { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 const toCSV = rows => rows.map(r => r.map(csvCell).join(',')).join('\r\n');
 function exportSummary() {
-  const rows = [[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel'), t('colMass'), t('colMeeting'), t('colFridays'), t('colPct'), t('colStreak')]];
-  const { dates } = reportRows('all');
+  const rows = [[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel'), t('addressLabel'), t('confessorLabel'), t('birthdayLabel'), t('colMass'), t('colMeeting'), t('colWeeks'), t('colPct'), t('colStreak')]];
+  const { dates, weeks } = reportRows('all');
   sortByName(state.members).forEach(m => {
-    const s = statsFor(m, dates);
-    rows.push([m.name, className(m.classId), m.phone || '', m.parentPhone || '', s.mass, s.meeting, s.total, s.pct + '%', s.streak]);
+    const s = statsFor(m, dates, weeks);
+    rows.push([m.name, className(m.classId), m.phone || '', m.parentPhone || '', m.address || '', m.confessor || '', m.birthday || '', s.mass, s.meeting, s.total, s.pct + '%', s.streak]);
   });
   download('attendance_summary_' + todayISO() + '.csv', toCSV(rows));
 }
 function exportMatrix() {
-  const dates = datesFor(state.members.map(m => m.id));
+  const weeks = buildWeeks(), dates = datesFor(state.members.map(m => m.id), weeks);
   const rows = [[t('colName'), t('colClass'), ...dates]];
   sortByName(state.members).forEach(m => {
     rows.push([m.name, className(m.classId), ...dates.map(d => {
-      const a = attended(m.id, d, 'mass'), b = attended(m.id, d, 'meeting');
+      const a = attendedW(weeks, m.id, d, 'mass'), b = attendedW(weeks, m.id, d, 'meeting');
       return a && b ? t('both') : a ? t('mass') : b ? t('meeting') : '-';
     })]);
   });
-  download('attendance_by_friday_' + todayISO() + '.csv', toCSV(rows));
+  download('attendance_by_week_' + todayISO() + '.csv', toCSV(rows));
 }
 function printReport() {
-  let html = '<h1>' + esc(t('appTitle')) + '</h1><p>' + esc(fmtDate(latestFriday())) + '</p>';
+  let html = '<h1>' + esc(t('appTitle')) + '</h1><p>' + esc(fmtWeek(latestAnchor())) + '</p>';
   const groups = classes().map(c => ({ name: c.name, sel: c.id }));
   if (state.members.some(m => !hasClass(m))) groups.push({ name: t('noClass'), sel: 'none' });
   groups.forEach(g => {
     const { dates, rows } = reportRows(g.sel);
     if (!rows.length) return;
-    html += '<h2>' + esc(g.name) + ' — ' + esc(t('fridaysCount', dates.length)) + '</h2><table><tr><th>' + esc(t('colName')) + '</th><th>' + esc(t('colMass')) + '</th><th>' + esc(t('colMeeting')) + '</th><th>' + esc(t('colPct')) + '</th><th>' + esc(t('colStreak')) + '</th></tr>';
+    html += '<h2>' + esc(g.name) + ' — ' + esc(t('weeksCount', dates.length)) + '</h2><table><tr><th>' + esc(t('colName')) + '</th><th>' + esc(t('colMass')) + '</th><th>' + esc(t('colMeeting')) + '</th><th>' + esc(t('colPct')) + '</th><th>' + esc(t('colStreak')) + '</th></tr>';
     rows.forEach(r => { html += '<tr><td>' + esc(r.m.name) + '</td><td>' + r.mass + '/' + r.total + '</td><td>' + r.meeting + '/' + r.total + '</td><td>' + r.pct + '%</td><td>' + r.streak + '</td></tr>'; });
     html += '</table>';
   });
@@ -323,8 +396,9 @@ function ensureXLSX() {
   });
 }
 const pick = (row, keys) => { for (const k of keys) if (row[k] != null && String(row[k]).trim() !== '') return String(row[k]).trim(); return ''; };
+const pickRaw = (row, keys) => { for (const k of keys) if (row[k] != null && String(row[k]).trim() !== '') return row[k]; return ''; };
 function templateCSV() {
-  download('import_template.csv', toCSV([[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel')], [t('exampleName'), t('exampleClass'), '', '']]));
+  download('import_template.csv', toCSV([[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel'), t('addressLabel'), t('confessorLabel'), t('birthdayLabel')], [t('exampleName'), t('exampleClass'), '', '', '', '', t('exampleBirthday')]]));
 }
 async function importFile(input) {
   const file = input.files && input.files[0]; if (!file) return;
@@ -340,7 +414,9 @@ async function importFile(input) {
       let c = cname ? classes().find(x => x.name === cname) || addClass(cname) : null;
       const classId = c ? c.id : null;
       if (state.members.some(m => m.name === name && m.classId === classId)) { skipped++; return; }
-      state.members.push({ id: uid('m_'), name, classId, phone: pick(row, ['رقم الهاتف', 'Phone number', 'Phone']), parentPhone: pick(row, ['رقم هاتف ولي الأمر', 'Parent phone number', 'Parent phone']), addedAt: todayISO() });
+      state.members.push({ id: uid('m_'), name, classId, phone: pick(row, ['رقم الهاتف', 'Phone number', 'Phone']), parentPhone: pick(row, ['رقم هاتف ولي الأمر', 'Parent phone number', 'Parent phone']),
+        address: pick(row, ['العنوان', 'Address']), confessor: pick(row, ['أب الاعتراف', 'اب الاعتراف', 'Confession father', 'Confessor']),
+        birthday: parseBirthday(pickRaw(row, ['عيد الميلاد', 'تاريخ الميلاد', 'Birthday', 'Birth date'])), addedAt: todayISO() });
       added++;
     });
     persist(); state.importStatus = t('importDone', added, skipped);
@@ -403,12 +479,12 @@ function viewClassTabs() {
   return h + '</div>';
 }
 function viewAttend() {
-  const d = state.selectedDate, cap = latestFriday(), rtl = lang() !== 'en';
+  const d = state.selectedDate, cap = latestAnchor(), rtl = lang() !== 'en';
   const nav = (act, sym, off) => '<button class="btn btn-sm btn-outline-dark" data-act="' + act + '"' + (off ? ' disabled' : '') + '>' + sym + '</button>';
   let h = '<div class="d-flex align-items-center justify-content-center gap-2 mb-2">' +
-    nav('date-prev', rtl ? '&#8594;' : '&#8592;', false) + '<span class="fw-bold text-center date-label">' + esc(fmtDate(d)) + '</span>' + nav('date-next', rtl ? '&#8592;' : '&#8594;', d >= cap) +
-    '<span class="position-relative"><button class="btn btn-sm btn-dark cal-btn" tabindex="-1" type="button">&#128197;</button><input class="cal-input" type="date" value="' + d + '" max="' + cap + '" data-change="date-pick" aria-label="' + esc(t('pickDate')) + '"></span></div>';
-  h += '<div class="small text-secondary text-center mb-2">' + esc(t('fridayOnly')) + (d === cap ? '' : ' · <a href="#" data-act="date-today">' + esc(t('goLatest')) + '</a>') + '</div>';
+    nav('date-prev', rtl ? '&#8594;' : '&#8592;', false) + '<span class="fw-bold text-center date-label">' + (meetingOffset() === 0 ? '<span class="d-block">' + esc(fmtDay(d)) + '</span>' : '<span class="d-block small">' + esc(t('mass')) + ': ' + esc(fmtDay(d)) + '</span><span class="d-block small">' + esc(t('meeting')) + ': ' + esc(fmtDay(meetingDateOf(d))) + '</span>') + '</span>' + nav('date-next', rtl ? '&#8592;' : '&#8594;', d >= cap) +
+    '<span class="position-relative"><button class="btn btn-sm btn-dark cal-btn" tabindex="-1" type="button">&#128197;</button><input class="cal-input" type="date" value="' + d + '" max="' + todayISO() + '" data-change="date-pick" aria-label="' + esc(t('pickDate')) + '"></span></div>';
+  h += '<div class="small text-secondary text-center mb-2">' + esc(t('daysNote', DAY_NAMES[lang()][massDay()], DAY_NAMES[lang()][meetingDay()])) + (d === cap ? '' : ' · <a href="#" data-act="date-today">' + esc(t('goLatest')) + '</a>') + '</div>';
   h += '<div class="d-flex gap-2 mb-2"><div class="input-group input-group-sm"><span class="input-group-text">&#128269;</span><input id="searchBox" class="form-control" placeholder="' + esc(t('searchPh')) + '" value="' + esc(state.search) + '" data-input="search"></div>' +
     '<button class="btn btn-sm btn-outline-dark text-nowrap" data-act="sort">' + esc(state.sortDir === 'asc' ? t('sortAsc') : t('sortDesc')) + '</button></div>';
   return h + '<div id="listArea">' + viewList() + '</div>';
@@ -416,16 +492,19 @@ function viewAttend() {
 function viewList() {
   const all = membersIn(state.selectedClass), q = state.search.trim().toLowerCase();
   const list = sortByName(all).filter(m => !q || m.name.toLowerCase().includes(q));
-  const r = dayRec(state.selectedDate), ids = new Set(all.map(m => m.id));
-  const mc = r.mass.filter(i => ids.has(i)).length, sc = r.meeting.filter(i => ids.has(i)).length;
+  const weeks = buildWeeks(), e = weeks.get(state.selectedDate) || EMPTY_WEEK;
+  const mc = all.filter(m => e.mass.has(m.id)).length, sc = all.filter(m => e.meeting.has(m.id)).length;
   let h = '<div class="d-flex gap-2 mb-2"><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('mass')) + ' ' + mc + '/' + all.length + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('meeting')) + ' ' + sc + '/' + all.length + '</span></div>';
   if (!list.length) return h + '<div class="text-center text-secondary small py-4">' + esc(t('emptyList')) + '</div>';
   h += '<ul class="list-group list-group-flush border-top">';
   list.forEach((m, i) => {
-    const tg = (kind, on) => '<button class="btn btn-sm rounded-pill att-toggle ' + (on ? 'btn-dark active' : 'btn-outline-dark') + '" data-act="toggle" data-kind="' + kind + '" data-id="' + esc(m.id) + '" aria-pressed="' + on + '">' + (on ? '&#10003; ' : '') + esc(t(kind)) + '</button>';
+    const tg = (kind, on) => {
+      const future = (kind === 'mass' ? state.selectedDate : meetingDateOf(state.selectedDate)) > todayISO() && !on;   // not happened yet
+      return '<button class="btn btn-sm rounded-pill att-toggle ' + (on ? 'btn-dark active' : 'btn-outline-dark') + '" data-act="toggle" data-kind="' + kind + '" data-id="' + esc(m.id) + '" aria-pressed="' + on + '"' + (future ? ' disabled title="' + esc(t('notYet')) + '"' : '') + '>' + (on ? '&#10003; ' : '') + esc(t(kind)) + '</button>';
+    };
     h += '<li class="list-group-item d-flex align-items-center gap-2 px-1"><span class="seq">' + (i + 1) + '</span>' +
-      '<button class="btn btn-link text-decoration-none text-body text-start p-0 flex-grow-1 fw-medium text-truncate" data-act="open" data-id="' + esc(m.id) + '">&#128100; ' + esc(m.name) + '</button>' +
-      tg('mass', r.mass.includes(m.id)) + tg('meeting', r.meeting.includes(m.id)) + '</li>';
+      '<button class="btn btn-link text-decoration-none text-body text-start p-0 flex-grow-1 fw-medium d-flex align-items-center gap-1 min-w-0" data-act="open" data-id="' + esc(m.id) + '"><span class="text-truncate">&#128100; ' + esc(m.name) + '</span>' + cake(m) + '</button>' +
+      tg('mass', e.mass.has(m.id)) + tg('meeting', e.meeting.has(m.id)) + '</li>';
   });
   return h + '</ul>';
 }
@@ -433,9 +512,9 @@ function viewReport() {
   const { dates, rows } = reportRows(state.selectedClass);
   if (!rows.length) return '<div class="text-center text-secondary small py-4">' + esc(t('emptyList')) + '</div>';
   if (!dates.length) return '<div class="text-center text-secondary small py-4">' + esc(t('noRecorded')) + '</div>';
-  let h = '<div class="small text-secondary mb-2">' + esc(t('fridaysCount', dates.length)) + '</div><div class="table-responsive"><table class="table table-sm align-middle mb-2"><thead><tr><th>' + esc(t('colName')) + '</th><th class="text-center">' + esc(t('colMass')) + '</th><th class="text-center">' + esc(t('colMeeting')) + '</th><th class="text-center">' + esc(t('colPct')) + '</th><th class="text-center">' + esc(t('colStreak')) + '</th></tr></thead><tbody>';
+  let h = '<div class="small text-secondary mb-2">' + esc(t('weeksCount', dates.length)) + '</div><div class="table-responsive"><table class="table table-sm align-middle mb-2"><thead><tr><th>' + esc(t('colName')) + '</th><th class="text-center">' + esc(t('colMass')) + '</th><th class="text-center">' + esc(t('colMeeting')) + '</th><th class="text-center">' + esc(t('colPct')) + '</th><th class="text-center">' + esc(t('colStreak')) + '</th></tr></thead><tbody>';
   rows.forEach(r => {
-    h += '<tr><td><button class="btn btn-link text-decoration-none text-body text-start p-0 fw-medium" data-act="open" data-id="' + esc(r.m.id) + '">' + esc(r.m.name) + '</button></td><td class="text-center">' + r.mass + '/' + r.total + '</td><td class="text-center">' + r.meeting + '/' + r.total + '</td><td class="text-center">' + r.pct + '%</td><td class="text-center">' +
+    h += '<tr><td><button class="btn btn-link text-decoration-none text-body text-start p-0 fw-medium" data-act="open" data-id="' + esc(r.m.id) + '">' + esc(r.m.name) + cake(r.m) + '</button></td><td class="text-center">' + r.mass + '/' + r.total + '</td><td class="text-center">' + r.meeting + '/' + r.total + '</td><td class="text-center">' + r.pct + '%</td><td class="text-center">' +
       (r.streak >= STREAK_ALERT ? '<span class="badge rounded-pill flag-red">' + r.streak + '</span>' : r.streak) + '</td></tr>';
   });
   return h + '</tbody></table></div><p class="small text-secondary">' + esc(t('streakHint', STREAK_ALERT)) + '</p>';
@@ -444,19 +523,24 @@ function viewReport() {
 function viewDetail() {
   const m = state.members.find(x => x.id === state.selectedMemberId);
   if (!m) { state.screen = 'main'; return viewMain(); }
-  const dates = datesFor(membersIn(hasClass(m) ? m.classId : 'none').map(x => x.id));
-  const s = statsFor(m, dates), rows = s.dates.slice().reverse();
+  const weeks = buildWeeks(), dates = datesFor(membersIn(hasClass(m) ? m.classId : 'none').map(x => x.id), weeks);
+  const s = statsFor(m, dates, weeks), rows = s.dates.slice().reverse();
   const flag = (on, label) => '<span class="badge rounded-pill ' + (on ? 'flag-ok' : 'flag-bad') + '">' + (on ? '&#10003; ' : '&#10007; ') + esc(label) + '</span>';
   const phone = (field, label) => '<p class="small text-secondary mb-1">' + esc(label) + '</p><div class="d-flex gap-2 align-items-center mb-2"><input class="form-control form-control-sm" type="tel" value="' + esc(m[field] || '') + '" placeholder="' + esc(t('noNumber')) + '" data-change="contact" data-field="' + field + '" data-id="' + esc(m.id) + '">' +
     (m[field] ? '<a class="btn btn-sm btn-outline-dark text-nowrap" href="tel:' + esc(m[field]) + '">' + esc(t('call')) + '</a>' : '') + '</div>';
+  const info = (field, label, type, ph) => '<p class="small text-secondary mb-1">' + esc(label) + '</p><input class="form-control form-control-sm mb-2" type="' + type + '" value="' + esc(m[field] || '') + '" placeholder="' + esc(ph || '') + '" data-change="contact" data-field="' + field + '" data-id="' + esc(m.id) + '">';
   return '<button class="btn btn-sm btn-outline-dark mb-3" data-act="back">' + esc(t('back')) + '</button><div id="syncBanner"></div>' +
-    '<h2 class="h4 fw-bold mb-3">' + esc(m.name) + '</h2>' +
+    '<h2 class="h4 fw-bold mb-3">' + esc(m.name) + cake(m) + '</h2>' +
     '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('classSection')) + '</h3><div class="d-flex flex-wrap gap-2">' +
       btnPill(!hasClass(m), 'move-class', 'data-id="' + esc(m.id) + '" data-class=""', esc(t('noClass'))) + classes().map(c => btnPill(m.classId === c.id, 'move-class', 'data-id="' + esc(m.id) + '" data-class="' + esc(c.id) + '"', esc(c.name))).join('') + '</div></div>' +
     '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('contactSection')) + '</h3>' + phone('phone', t('phoneLabel')) + phone('parentPhone', t('parentLabel')) + '</div>' +
+    '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('infoSection')) + '</h3>' +
+      info('address', t('addressLabel'), 'text', t('addressLabel')) + info('confessor', t('confessorLabel'), 'text', t('confessorPh')) +
+      '<p class="small text-secondary mb-1">' + esc(t('birthdayLabel')) + '</p><input class="form-control form-control-sm" type="date" value="' + esc(m.birthday || '') + '" max="' + todayISO() + '" data-change="contact" data-field="birthday" data-id="' + esc(m.id) + '">' +
+      (m.birthday && parseBirthday(m.birthday) ? '<p class="small text-secondary mt-1 mb-0">' + esc(t('birthdayOn', fmtShort(m.birthday))) + (birthdayThisMonth(m) ? ' &#127874; ' + esc(t('birthdayMonth')) : '') + '</p>' : '') + '</div>' +
     '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('historySection')) + '</h3>' +
       (s.total ? '<div class="d-flex flex-wrap gap-2 mb-2"><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('mass')) + ' ' + s.mass + '/' + s.total + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('meeting')) + ' ' + s.meeting + '/' + s.total + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + s.pct + '%</span></div>' +
-        '<ul class="list-group list-group-flush border-top">' + rows.map(d => '<li class="list-group-item d-flex align-items-center gap-2 px-1 small"><span class="flex-grow-1">' + esc(fmtDate(d)) + '</span>' + flag(attended(m.id, d, 'mass'), t('mass')) + flag(attended(m.id, d, 'meeting'), t('meeting')) + '</li>').join('') + '</ul>'
+        '<ul class="list-group list-group-flush border-top">' + rows.map(d => '<li class="list-group-item d-flex align-items-center gap-2 px-1 small"><span class="flex-grow-1">' + esc(fmtWeek(d)) + '</span>' + flag(attendedW(weeks, m.id, d, 'mass'), t('mass')) + flag(attendedW(weeks, m.id, d, 'meeting'), t('meeting')) + '</li>').join('') + '</ul>'
         : '<p class="small text-secondary mb-0">' + esc(t('noRecorded')) + '</p>') + '</div>' +
     '<button class="btn btn-sm btn-outline-danger" data-act="delete-member" data-id="' + esc(m.id) + '">' + esc(t('deleteMember')) + '</button>';
 }
@@ -468,6 +552,8 @@ function viewSettings() {
   h += sec(t('accountTitle'), '<p class="small text-secondary mb-1">' + esc(t('codeLabel')) + '</p><div class="d-flex flex-wrap align-items-center gap-2"><span class="badge border fw-normal code-badge">' + esc(state.teacherCode || '') + '</span>' + '<button class="btn btn-sm btn-outline-dark" data-act="copy-code">' + esc(t('copyCode')) + '</button></div>' +
     '<p id="syncStatusLine" class="small text-secondary mt-1 mb-0"></p><div class="d-flex flex-wrap gap-2 mt-2"><button class="btn btn-sm btn-outline-dark" data-act="sync-now">' + esc(t('syncNow')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="logout">' + esc(t('logout')) + '</button></div>');
   h += sec(t('passwordTitle'), '<p class="small text-secondary">' + esc(t('passwordHint')) + '</p><div class="d-flex gap-2"><input id="newTeacherPw" class="form-control form-control-sm" type="password" placeholder="' + esc(t('password')) + '" data-enter="save-password"><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="save-password">' + esc(t('save')) + '</button></div>');
+  const dayOpts = cur => DAY_NAMES[lang()].map((n, i) => '<option value="' + i + '"' + (cur === i ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
+  h += sec(t('daysTitle'), '<p class="small text-secondary">' + esc(t('daysHint')) + '</p><div class="d-flex gap-2"><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('massDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="mass">' + dayOpts(massDay()) + '</select></div><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('meetingDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="meeting">' + dayOpts(meetingDay()) + '</select></div></div>');
   h += sec(t('languageTitle'), '<div class="d-flex flex-wrap gap-2">' + langBtns() + '</div>');
   h += sec(t('fontTitle'), '<div class="d-flex flex-wrap gap-2">' + ['small', 'medium', 'large'].map(k => btnPill(state.settings.fontSize === k, 'font', 'data-size="' + k + '"', esc(t(k)))).join('') + '</div><label class="d-flex align-items-center gap-2 small mt-2"><input class="form-check-input mt-0" type="checkbox" ' + (state.settings.highContrast ? 'checked' : '') + ' data-change="contrast"> ' + esc(t('highContrast')) + '</label>');
   {
@@ -519,8 +605,8 @@ function act(name, el) {
     case 'class': state.selectedClass = d.sel; return render();
     case 'sort': state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc'; return render();
     case 'date-prev': state.selectedDate = addDays(state.selectedDate, -7); return render();
-    case 'date-next': if (state.selectedDate < latestFriday()) state.selectedDate = addDays(state.selectedDate, 7); return render();
-    case 'date-today': state.selectedDate = latestFriday(); return render();
+    case 'date-next': if (state.selectedDate < latestAnchor()) state.selectedDate = addDays(state.selectedDate, 7); return render();
+    case 'date-today': state.selectedDate = latestAnchor(); return render();
     case 'toggle': return toggleAtt(d.id, d.kind);
     case 'open': state.selectedMemberId = d.id; state.screen = 'detail'; return render();
     case 'move-class': { const m = state.members.find(x => x.id === d.id); if (m) { m.classId = d.class || null; persist(); render(); } return; }
@@ -557,8 +643,9 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const el = e.target, d = el.dataset;
   switch (d.change) {
-    case 'date-pick': if (el.value) { state.selectedDate = lastFriday(el.value > latestFriday() ? latestFriday() : el.value); render(); } break;
-    case 'contact': { const m = state.members.find(x => x.id === d.id); if (m) { m[d.field] = el.value.trim(); persist(); render(); } break; }
+    case 'date-pick': if (el.value) { state.selectedDate = weekOf(el.value); normalizeSelected(); render(); } break;
+    case 'set-day': state.config[d.which === 'mass' ? 'massDay' : 'meetingDay'] = +el.value; normalizeSelected(); persist(); render(); break;
+    case 'contact': { const m = state.members.find(x => x.id === d.id); if (m) { m[d.field] = d.field === 'birthday' ? parseBirthday(el.value) : el.value.trim(); persist(); render(); } break; }
     case 'rename-class': renameClass(d.id, el.value); break;
     case 'contrast': setPrefs({ highContrast: el.checked }); break;
     case 'import': importFile(el); break;

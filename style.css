@@ -39,6 +39,7 @@ body { background: var(--bg); color: var(--ink); }
 .form-check-input { background-color: var(--surface); border-color: var(--ink-soft); }
 .form-check-input:checked { background-color: var(--ink); border-color: var(--ink); }
 .card { --bs-card-bg: var(--surface); --bs-card-border-color: var(--line); }
+ul.list-group { padding-inline-start: 0; }
 .list-group { --bs-list-group-bg: transparent; --bs-list-group-color: var(--ink); --bs-list-group-border-color: var(--line); }
 .nav-tabs { --bs-nav-tabs-border-color: var(--line); --bs-nav-link-color: var(--ink-soft); --bs-nav-link-hover-color: var(--ink);
   --bs-nav-tabs-link-hover-border-color: transparent; --bs-nav-tabs-link-active-color: var(--ink);
@@ -64,6 +65,9 @@ body { background: var(--bg); color: var(--ink); }
 .code-badge { font-size: 1.05rem; letter-spacing: 2px; padding: .4rem .8rem; background: var(--surface); color: var(--ink); }
 .cal-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
 .cal-btn { pointer-events: none; }
+
+.cake { font-size: 1.05em; flex-shrink: 0; }
+.min-w-0 { min-width: 0; }
 
 /* print / PDF */
 #printReport { display: none; }
