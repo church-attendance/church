@@ -1,4 +1,4 @@
-const CACHE = 'sejjel-v5';
+const CACHE = 'church-v3';
 const SHELL = [
   './', './index.html', './style.css', './i18n.js', './app.js', './manifest.json',
   './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'
