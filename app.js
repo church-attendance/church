@@ -1,656 +1,1101 @@
-// حضور الفصول — Friday attendance: mass (قداس) + meeting (اجتماع), by class (فصل)
+// السجل — application logic
+const CYCLE_LENGTH = 8;
+const GROUPS = [
+  {id:'sat_tue', days:[6,2]},
+  {id:'sun_wed', days:[0,3]},
+  {id:'mon_thu', days:[1,4]}
+];
+const FONT_SCALES = {small: 0.9, medium: 1, large: 1.2};
+const DEFAULT_SETTINGS = {fee: 50, fontSize: 'medium', highContrast: false, cycleMode: 'personal', lang: 'ar', lastSeenMonth: '', hourSlots: {sat_tue: [], sun_wed: [], mon_thu: []}, grades: [], teacherPassword: ''};
 
-/* ================= config ================= */
+
+function onSearchInput(el){
+  // redrawing replaces the input, so put the cursor back where it was or typing would stop after one letter
+  const pos = el.selectionStart;
+  state.search = el.value;
+  render();
+  const n = document.querySelector('.att-search input');
+  if(n){ n.focus(); try{ n.setSelectionRange(pos, pos); }catch(e){} }
+}
+function applyBootstrapDirection(){
+  // Both Bootstrap files are loaded; the matching one is switched on through `media`
+  // (re-enabling a disabled stylesheet is unreliable in Chrome).
+  const rtl = (state.settings && state.settings.lang === 'en') ? false : true;
+  const r = document.getElementById('bs-rtl'), l = document.getElementById('bs-ltr');
+  if(r) r.media = rtl ? 'all' : 'not all';
+  if(l) l.media = rtl ? 'not all' : 'all';
+}
+
+function lang(){ return state.settings.lang === 'en' ? 'en' : 'ar'; }
+function t(key){ return T[lang()][key]; }
+
+function todayISO(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function shiftDay(iso,delta){
+  const [y,mo,da] = iso.split('-').map(Number);
+  const d = new Date(y, mo-1, da);
+  d.setDate(d.getDate()+delta);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function formatDateAr(iso){ const d=new Date(iso+'T00:00:00'); const L=lang(); return DAY_NAMES[L][d.getDay()]+(L==='ar'?'، ':', ')+d.getDate()+' '+MONTH_NAMES[L][d.getMonth()]; }
+function groupDaysLabel(g){ return g.days.map(d=>DAY_NAMES[lang()][d]).join(lang()==='ar'?' و ':' & '); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function loadLocal(key, fallback){ try{ const v=localStorage.getItem('att_'+key); return v?JSON.parse(v):fallback; } catch(e){ return fallback; } }
+function saveLocal(key, value){ try{ localStorage.setItem('att_'+key, JSON.stringify(value)); } catch(e){ console.error(e); } }
+
+let state = {
+  members: [], attendance: {}, payments: {},
+  settings: DEFAULT_SETTINGS, ready: false,
+  teacherCode: null, authScreen: null, authMode: 'create', joinRole: 'teacher', joinCodeDraft: '', authError: '',
+  welcomeMsg: '', monthlySummaryMsg: '', dismissedSevere: false,
+  screen: 'main', selectedMemberId: null, selectedGroup: GROUPS[0].id, selectedHourSlot: 'all',
+  tab: 'attendance', sortDir: 'asc', search: '', selectedDate: todayISO(),
+  adding: false, draftGroup: GROUPS[0].id, draftHourSlot: null, draftGrade: null, amountDrafts: {},
+  bulkSelected: {}, bulkTargetGroup: GROUPS[0].id, syncStatus: '', importStatus: '', newHourSlotDraft: {}, advanceDrafts: {},
+  showGrades: false, selectedGrade: 'all', gradesEditMode: false, renamingGrade: null
+};
+
 const SUPABASE_URL = 'https://kcarkkmuludbmdlakkxd.supabase.co/rest/v1';
 const SUPABASE_KEY = 'sb_publishable_LnDpH8NgNADbQ8dzLW4NlA_SkpPFoSC';
 const DB_TABLE = 'app_data';
-const APP_TAG = 'church-attendance';   // lets us refuse codes that belong to a different app
-const PREFIX = 'ch_';                  // localStorage prefix (the other app on github.io uses its own)
-const FONT_SCALES = { small: 0.9, medium: 1, large: 1.2 };
-const DEFAULT_SETTINGS = { lang: 'ar', fontSize: 'medium', highContrast: false };
-const STREAK_ALERT = 3;                // missed Fridays in a row that turn red in the report
-
-/* ================= small helpers ================= */
-const $ = (s, r) => (r || document).querySelector(s);
-const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const uid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const load = (k, f) => { try { const v = localStorage.getItem(PREFIX + k); return v === null ? f : JSON.parse(v); } catch (e) { return f; } };
-const save = (k, v) => { try { localStorage.setItem(PREFIX + k, JSON.stringify(v)); } catch (e) { /* storage full / blocked */ } };
-
-let state = {
-  ready: false,
-  members: [], attendance: {}, config: { classes: [], teacherPassword: '' },
-  settings: { ...DEFAULT_SETTINGS },
-  teacherCode: null, pendingSync: false, syncStatus: '',
-  authMode: 'create', joinCodeDraft: '', authError: '',
-  screen: 'main', view: 'attend', selectedClass: 'all', selectedMemberId: null, selectedDate: null,
-  search: '', sortDir: 'asc', adding: false, draft: { name: '', phone: '', parent: '', classId: null },
-  welcomeMsg: '', importStatus: '', statusMsg: '', bulkFrom: '', bulkTo: ''
-};
-
-const lang = () => (state.settings.lang === 'en' ? 'en' : 'ar');
-function t(key, ...a) {
-  let v = T[lang()][key];
-  if (v === undefined) v = T.ar[key];
-  return typeof v === 'function' ? v(...a) : v;
+function dbHeaders(extra){
+  return Object.assign({'apikey': SUPABASE_KEY, 'Authorization': 'Bearer '+SUPABASE_KEY}, extra||{});
 }
-
-/* ================= dates (Fridays only) ================= */
-const pad = n => String(n).padStart(2, '0');
-const toISO = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-const parseISO = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
-const todayISO = () => toISO(new Date());
-function addDays(s, n) { const d = parseISO(s); d.setDate(d.getDate() + n); return toISO(d); }
-/* ---- service days: the mass day and the meeting day are settings (default: both on Friday) ----
-   A "week" is identified by its mass date (the anchor). The meeting of that week is the occurrence of the meeting
-   weekday closest to the mass date (up to 3 days before or after), so one week = one mass + one meeting. */
-const massDay = () => (state.config.massDay != null ? +state.config.massDay : 5);
-const meetingDay = () => (state.config.meetingDay != null ? +state.config.meetingDay : 5);
-const meetingOffset = () => ((((meetingDay() - massDay() + 3) % 7) + 7) % 7) - 3;      // -3 … +3 days from the mass
-const lastOn = (s, wd) => { const d = parseISO(s); d.setDate(d.getDate() - ((d.getDay() - wd + 7) % 7)); return toISO(d); };
-const meetingDateOf = w => addDays(w, meetingOffset());
-function weekOf(d) {                 // which week (anchor) a recorded date belongs to
-  const wd = parseISO(d).getDay();
-  if (wd === massDay()) return d;
-  if (wd === meetingDay()) return addDays(d, -meetingOffset());
-  return lastOn(d, massDay());       // a date recorded under older day settings
+function generateTeacherCode(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let c=''; for(let i=0;i<6;i++) c += chars[Math.floor(Math.random()*chars.length)];
+  return c;
 }
-function latestAnchor() {            // newest week that has already started (its mass or meeting date has come)
-  const now = todayISO();
-  let a = addDays(lastOn(now, massDay()), 7);
-  while (a > now && meetingDateOf(a) > now) a = addDays(a, -7);
-  return a;
-}
-function firstWeekFrom(s) {          // first week that was not completely over when someone joined
-  let a = addDays(lastOn(s, massDay()), -7);
-  while (a < s && meetingDateOf(a) < s) a = addDays(a, 7);
-  return a;
-}
-function normalizeSelected() { const cap = latestAnchor(), w = weekOf(state.selectedDate || cap); state.selectedDate = w > cap ? cap : w; }
-const dayName = d => DAY_NAMES[lang()][parseISO(d).getDay()];
-function fmtDay(s) { const d = parseISO(s); return dayName(s) + (lang() === 'ar' ? '، ' : ', ') + d.getDate() + ' ' + MONTH_NAMES[lang()][d.getMonth()] + ' ' + d.getFullYear(); }
-function fmtWeek(w) { const m = meetingDateOf(w); return meetingOffset() === 0 ? fmtDay(w) : fmtDay(w) + ' / ' + dayName(m) + ' ' + fmtShort(m); }
-function fmtShort(s) { const d = parseISO(s); return d.getDate() + ' ' + MONTH_NAMES[lang()][d.getMonth()]; }
-
-/* ---- birthdays: stored as YYYY-MM-DD; a 🎂 shows beside the name during the member's birthday month ---- */
-const toLatin = s => String(s).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
-function validISO(y, m, d) {
-  y = +y; m = +m; d = +d;
-  const dt = new Date(y, m - 1, d);
-  return y >= 1900 && dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d ? y + '-' + pad(m) + '-' + pad(d) : '';
-}
-function parseBirthday(v) {          // accepts a date input value, 15/11/2012, 2012-11-15, Arabic digits, or an Excel date number
-  if (v == null || v === '') return '';
-  if (v instanceof Date) return validISO(v.getFullYear(), v.getMonth() + 1, v.getDate());
-  if (typeof v === 'number') {
-    if (v < 1 || v > 80000) return '';
-    const d = new Date(Math.round((v - 25569) * 864e5));
-    return validISO(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
-  }
-  const s = toLatin(v).trim();
-  if (/^\d{5}$/.test(s)) return parseBirthday(Number(s));      // an Excel date that arrived as text
-  let m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
-  if (m) return validISO(m[1], m[2], m[3]);
-  m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/);
-  if (m) { let y = +m[3]; if (y < 100) y += y > 30 ? 1900 : 2000; return validISO(y, m[2], m[1]); }
-  return '';
-}
-const birthdayThisMonth = m => !!m.birthday && /^\d{4}-\d{2}-\d{2}$/.test(m.birthday) && parseISO(m.birthday).getMonth() === new Date().getMonth();
-const cake = m => birthdayThisMonth(m) ? ' <span class="cake" title="' + esc(t('birthdayMonth')) + '">&#127874;</span>' : '';
-
-/* ================= classes, members, attendance ================= */
-const classes = () => state.config.classes;
-const classById = id => classes().find(c => c.id === id);
-const className = id => (classById(id) ? classById(id).name : t('noClass'));
-const hasClass = m => !!classById(m.classId);
-function membersIn(sel) {
-  return state.members.filter(m => sel === 'all' ? true : sel === 'none' ? !hasClass(m) : m.classId === sel);
-}
-const sortByName = list => list.slice().sort((a, b) => a.name.localeCompare(b.name, 'ar') * (state.sortDir === 'asc' ? 1 : -1));
-// who attended each week, merged across every recorded date that belongs to that week
-function buildWeeks() {
-  const map = new Map();
-  Object.keys(state.attendance).forEach(d => {
-    const r = state.attendance[d], w = weekOf(d);
-    let e = map.get(w);
-    if (!e) { e = { mass: new Set(), meeting: new Set(), dates: [] }; map.set(w, e); }
-    (r.mass || []).forEach(i => e.mass.add(i)); (r.meeting || []).forEach(i => e.meeting.add(i)); e.dates.push(d);
-  });
-  return map;
-}
-const EMPTY_WEEK = { mass: new Set(), meeting: new Set(), dates: [] };
-const attendedW = (weeks, id, w, kind) => { const e = weeks.get(w); return !!(e && e[kind].has(id)); };
-
-function toggleAtt(id, kind) {
-  const w = state.selectedDate, e = buildWeeks().get(w);
-  if (e && e[kind].has(id)) {                       // un-tick: remove it from every date of this week
-    e.dates.forEach(d => {
-      const r = state.attendance[d]; r[kind] = (r[kind] || []).filter(i => i !== id);
-      if (!(r.mass || []).length && !(r.meeting || []).length) delete state.attendance[d];
-    });
-  } else {
-    const d = kind === 'mass' ? w : meetingDateOf(w);
-    if (d > todayISO()) return;                      // something that has not happened yet cannot be recorded
-    const r = state.attendance[d] || { mass: [], meeting: [] };
-    r.mass = r.mass || []; r.meeting = r.meeting || [];
-    r[kind].push(id); state.attendance[d] = r;
-  }
-  persist(); render();
-}
-// weeks (anchors, oldest first) in which at least one of these members was recorded
-function datesFor(ids, weeks) {
-  const set = new Set(ids), out = [];
-  weeks.forEach((e, w) => { if ([...e.mass].some(i => set.has(i)) || [...e.meeting].some(i => set.has(i))) out.push(w); });
-  return out.sort();
-}
-function statsFor(m, dates, weeks) {
-  // a member only counts the weeks from when they joined (or any week they actually attended)
-  const since = m.addedAt ? firstWeekFrom(m.addedAt) : '0000-00-00';
-  const a = (w, k) => attendedW(weeks, m.id, w, k);
-  const mine = dates.filter(w => w >= since || a(w, 'mass') || a(w, 'meeting'));
-  let mass = 0, meeting = 0, streak = 0;
-  mine.forEach(w => { if (a(w, 'mass')) mass++; if (a(w, 'meeting')) meeting++; });
-  for (let i = mine.length - 1; i >= 0; i--) {
-    if (a(mine[i], 'mass') || a(mine[i], 'meeting')) break;
-    streak++;
-  }
-  const total = mine.length;
-  return { mass, meeting, total, streak, pct: total ? Math.round(100 * (mass + meeting) / (2 * total)) : 0, dates: mine };
-}
-function reportRows(sel) {
-  const weeks = buildWeeks(), ms = sortByName(membersIn(sel));
-  const dates = datesFor(ms.map(m => m.id), weeks);
-  return { dates, weeks, rows: ms.map(m => ({ m, ...statsFor(m, dates, weeks) })) };
-}
-
-/* ================= storage + cloud sync ================= */
-const dbHeaders = extra => Object.assign({ apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }, extra || {});
-function newCode() { const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)]; return s; }
-async function fetchByCode(code) {
-  const res = await fetch(SUPABASE_URL + '/' + DB_TABLE + '?id=eq.' + encodeURIComponent(code) + '&select=payload', { headers: dbHeaders() });
-  if (!res.ok) throw new Error('fetch ' + res.status);
+async function fetchByCode(code){
+  const res = await fetch(SUPABASE_URL+'/'+DB_TABLE+'?id=eq.'+encodeURIComponent(code)+'&select=payload', { headers: dbHeaders() });
+  if(!res.ok) throw new Error('fetch failed: '+res.status);
   const rows = await res.json();
   return (rows && rows[0] && rows[0].payload) || null;
 }
-async function pushByCode(code, payload) {
-  const res = await fetch(SUPABASE_URL + '/' + DB_TABLE, {
+async function pushByCode(code, payload){
+  const res = await fetch(SUPABASE_URL+'/'+DB_TABLE, {
     method: 'POST',
-    headers: dbHeaders({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }),
-    body: JSON.stringify({ id: code, payload })
+    headers: dbHeaders({'Content-Type':'application/json', 'Prefer':'resolution=merge-duplicates,return=minimal'}),
+    body: JSON.stringify({id: code, payload: payload})
   });
-  if (!res.ok) throw new Error('push ' + res.status);
+  if(!res.ok) throw new Error('push failed: '+res.status);
 }
-const buildPayload = () => ({ app: APP_TAG, members: state.members, attendance: state.attendance, config: state.config });
-function persistLocal() { save('members', state.members); save('attendance', state.attendance); save('config', state.config); }
-function applyRemote(r) {
-  state.members = Array.isArray(r.members) ? r.members : [];
-  state.attendance = r.attendance || {};
-  state.config = { classes: [], teacherPassword: '', ...(r.config || {}) };
-  if (!['all', 'none'].includes(state.selectedClass) && !classById(state.selectedClass)) state.selectedClass = 'all';
-  normalizeSelected();
+function cloudConfig(){
+  return {fee: state.settings.fee, cycleMode: state.settings.cycleMode, hourSlots: state.settings.hourSlots, grades: state.settings.grades, teacherPassword: state.settings.teacherPassword};
 }
-function markPending(p) { state.pendingSync = p; save('pendingSync', p); refreshSyncUI(); }
-function refreshSyncUI() {
-  const b = $('#syncBanner');
-  if (b) b.innerHTML = state.pendingSync ? '<div class="alert alert-danger py-2 small">' + esc(t('pendingSyncBanner')) + '</div>' : '';
-  const s = $('#syncStatusLine');
-  if (s) s.textContent = state.syncStatus || '';
+function buildPayload(){
+  return {members: state.members, attendance: state.attendance, payments: state.payments, config: cloudConfig()};
 }
-// pushes are serialised so an older snapshot can never overwrite a newer one in the cloud
-let pushing = false, pushAgain = false;
-async function pushNow() {
-  if (!state.teacherCode) return;
-  if (pushing) { pushAgain = true; return; }
-  pushing = true;
-  try {
-    do { pushAgain = false; await pushByCode(state.teacherCode, buildPayload()); } while (pushAgain);
-    state.syncStatus = t('syncSuccess'); markPending(false);
-  } catch (e) {
-    state.syncStatus = t('offlineSaved'); markPending(true);
-  }
-  pushing = false; refreshSyncUI();
+function markSyncPending(pending){
+  state.pendingSync = pending;
+  saveLocal('pendingSync', pending);
 }
-function persist() { persistLocal(); if (state.teacherCode) pushNow(); }
+function pushNow(){
+  if(!state.teacherCode) return Promise.resolve();
+  return pushByCode(state.teacherCode, buildPayload()).then(function(){
+    markSyncPending(false);
+    state.syncStatus = t('syncSuccess');
+    render();
+  }).catch(function(){
+    markSyncPending(true);
+    state.syncStatus = t('offlineSaved');
+    render();
+  });
+}
+function persistAll(){
+  saveLocal('members', state.members);
+  saveLocal('attendance', state.attendance);
+  saveLocal('payments', state.payments);
+  if(state.teacherCode){ pushNow(); }
+}
+function persistSettings(){
+  saveLocal('settings', state.settings);
+  if(state.teacherCode){ pushNow(); }
+}
+function trySyncPending(){
+  if(!state.teacherCode || !state.pendingSync) return;
+  pushNow();
+}
+function isTeacher(){ return state.role !== 'assistant'; }
 
-let pulling = false;
-async function syncDown() {           // pick up changes made on other devices (only when nothing is waiting to upload)
-  if (!state.teacherCode || state.pendingSync || pushing || pulling) return;
-  pulling = true;
-  try {
-    const remote = await fetchByCode(state.teacherCode);
-    if (remote && !state.pendingSync && !pushing && JSON.stringify([remote.members, remote.attendance, remote.config]) !== JSON.stringify([state.members, state.attendance, state.config])) {
-      applyRemote(remote); persistLocal();
-      const ae = document.activeElement;
-      if (!(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))) render();   // never wipe something being typed
+// ---- Auth ----
+function checkNotices(){
+  const overdueCount = state.members.filter(function(m){return severity(m.id)==='red';}).length;
+  const curMonth = todayISO().slice(0,7);
+  if(state.settings.lastSeenMonth && state.settings.lastSeenMonth !== curMonth){
+    const prevMonth = state.settings.lastSeenMonth;
+    let total = 0;
+    state.members.forEach(function(m){
+      Object.values(state.payments[m.id]||{}).forEach(function(rec){
+        if(rec && rec.paid && rec.paidAt && rec.paidAt.slice(0,7)===prevMonth) total += rec.amount;
+      });
+    });
+    const label = MONTH_NAMES[lang()][Number(prevMonth.slice(5,7))-1];
+    state.monthlySummaryMsg = t('monthlySummary')(label, total);
+  }
+  state.settings.lastSeenMonth = curMonth;
+  persistSettings();
+}
+
+async function initLoad(){
+  state.settings = loadLocal('settings', DEFAULT_SETTINGS);
+  state.settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
+  document.documentElement.classList.toggle('hc', !!state.settings.highContrast);
+  document.documentElement.style.setProperty('--scale', FONT_SCALES[state.settings.fontSize] || 1);
+  document.documentElement.dir = state.settings.lang==='en' ? 'ltr' : 'rtl';
+  document.documentElement.lang = state.settings.lang==='en' ? 'en' : 'ar';
+  applyBootstrapDirection();
+
+  state.teacherCode = loadLocal('teacherCode', null);
+  state.role = loadLocal('role', 'teacher');
+  state.pendingSync = loadLocal('pendingSync', false);
+
+  if(state.teacherCode){
+    state.members = loadLocal('members', []);
+    state.attendance = loadLocal('attendance', {});
+    state.payments = loadLocal('payments', {});
+
+    if(state.pendingSync){
+      try { await pushByCode(state.teacherCode, buildPayload()); markSyncPending(false); }
+      catch(e){ /* still offline — keep local data, skip the remote pull below */ }
     }
-  } catch (e) { /* offline — try again later */ }
-  pulling = false;
-}
-function trySync() { if (state.pendingSync) pushNow(); else syncDown(); }
 
-/* ================= start-up ================= */
-function applyPrefs() {
-  const s = state.settings, rtl = s.lang !== 'en', de = document.documentElement;
-  de.lang = rtl ? 'ar' : 'en'; de.dir = rtl ? 'rtl' : 'ltr';
-  de.style.setProperty('--scale', FONT_SCALES[s.fontSize] || 1);
-  de.classList.toggle('hc', !!s.highContrast);
-  // both Bootstrap files are loaded; switch the matching one on via `media` (re-enabling a disabled link is unreliable in Chrome)
-  const r = $('#bs-rtl'), l = $('#bs-ltr');
-  if (r) r.media = rtl ? 'all' : 'not all';
-  if (l) l.media = rtl ? 'not all' : 'all';
-  document.title = t('appTitle');
-}
-async function init() {
-  state.settings = { ...DEFAULT_SETTINGS, ...load('settings', {}) };
-  applyPrefs();
-  state.teacherCode = load('teacherCode', null);
-  state.pendingSync = load('pendingSync', false);
-  state.members = load('members', []);
-  state.attendance = load('attendance', {});
-  state.config = { classes: [], teacherPassword: '', ...load('config', {}) };
-  state.selectedDate = latestAnchor();
-  state.ready = true; render();
-  if (state.teacherCode) {
-    if (state.pendingSync) { await pushNow(); }
-    else { await syncDown(); }
+    if(!state.pendingSync){
+      try {
+        const remote = await fetchByCode(state.teacherCode);
+        state.members = (remote && remote.members) || state.members;
+        state.attendance = (remote && remote.attendance) || state.attendance;
+        state.payments = (remote && remote.payments) || state.payments;
+        if(remote && remote.config){
+          state.settings.fee = remote.config.fee != null ? remote.config.fee : state.settings.fee;
+          state.settings.cycleMode = remote.config.cycleMode || state.settings.cycleMode;
+          state.settings.hourSlots = remote.config.hourSlots || state.settings.hourSlots;
+          state.settings.grades = remote.config.grades || state.settings.grades;
+          state.settings.teacherPassword = remote.config.teacherPassword || '';
+          saveLocal('settings', state.settings);
+        }
+        saveLocal('members', state.members); saveLocal('attendance', state.attendance); saveLocal('payments', state.payments);
+      } catch(e){
+        markSyncPending(true);
+      }
+    }
+    state.authScreen = null;
+    checkNotices();
+  } else {
+    state.members = loadLocal('members', []);
+    state.attendance = loadLocal('attendance', {});
+    state.payments = loadLocal('payments', {});
+    state.authScreen = 'start';
   }
-  window.addEventListener('online', trySync);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) trySync(); });
+  state.ready = true;
+  render();
+  window.addEventListener('online', trySyncPending);
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) trySyncPending(); });
 }
 
-/* ================= sign-in ================= */
-async function createCode(pw, confirmPw) {
-  pw = (pw || '').trim();
-  if (!pw) return fail(t('needPassword'));
-  if (pw !== confirmPw) return fail(t('passwordMismatch'));
-  const code = newCode(), cfg = { classes: [], teacherPassword: pw, massDay: 5, meetingDay: 5 };
-  try { await pushByCode(code, { app: APP_TAG, members: [], attendance: {}, config: cfg }); }
-  catch (e) { return fail(t('createFail')); }
-  Object.assign(state, { teacherCode: code, members: [], attendance: {}, config: cfg, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', welcomeMsg: t('codeCreated', code) });
-  save('teacherCode', code); save('pendingSync', false); persistLocal();
-  render();
+async function createNewCode(password, confirm){
+  password = (password||'').trim();
+  if(!password){ state.authError = t('fillAllFields'); render(); return; }
+  if(password !== confirm){ state.authError = t('passwordMismatch'); render(); return; }
+  state.authError = '';
+  const code = generateTeacherCode();
+  try {
+    state.teacherCode = code;
+    state.settings.teacherPassword = password;
+    await pushByCode(code, {members: [], attendance: {}, payments: {}, config: cloudConfig()});
+    state.role = 'teacher';
+    saveLocal('teacherCode', code); saveLocal('role', 'teacher'); saveLocal('settings', state.settings);
+    state.members = []; state.attendance = {}; state.payments = {};
+    saveLocal('members', []); saveLocal('attendance', {}); saveLocal('payments', {});
+    markSyncPending(false);
+    state.authScreen = null;
+    state.welcomeMsg = t('newCodeCreated')(code);
+    checkNotices();
+    render();
+  } catch(e){
+    state.teacherCode = null;
+    state.authError = t('codeCreateFail');
+    render();
+  }
 }
-async function joinCode(codeRaw, pw) {
-  const code = (codeRaw || '').trim().toUpperCase();
-  if (!code) return fail(t('needCode'));
-  let remote;
-  try { remote = await fetchByCode(code); } catch (e) { return fail(t('joinFail')); }
-  if (!remote) return fail(t('codeNotFound'));
-  if (remote.app !== APP_TAG) return fail(t('wrongApp'));
-  const stored = (remote.config && remote.config.teacherPassword) || '';
-  if (stored && (pw || '').trim() !== stored) return fail(t('wrongPassword'));
-  Object.assign(state, { teacherCode: code, authError: '', pendingSync: false, selectedClass: 'all', screen: 'main', joinCodeDraft: '' });
-  applyRemote(remote);
-  save('teacherCode', code); save('pendingSync', false); persistLocal();
-  render();
+async function joinWithCode(codeInput, passwordInput){
+  const code = (codeInput||'').trim().toUpperCase();
+  if(!code){ state.authError = t('enterCode'); render(); return; }
+  const role = state.joinRole === 'assistant' ? 'assistant' : 'teacher';
+  state.authError = '';
+  try {
+    const remote = await fetchByCode(code);
+    if(!remote){ state.authError = t('codeNotFound'); render(); return; }
+    const storedPw = (remote.config && remote.config.teacherPassword) || '';
+    if(role === 'teacher' && storedPw && (passwordInput||'').trim() !== storedPw){
+      state.authError = t('wrongPassword'); render(); return;
+    }
+    state.teacherCode = code;
+    state.role = role;
+    saveLocal('teacherCode', code); saveLocal('role', role);
+    state.members = remote.members || []; state.attendance = remote.attendance || {}; state.payments = remote.payments || {};
+    if(remote.config){
+      state.settings.fee = remote.config.fee != null ? remote.config.fee : state.settings.fee;
+      state.settings.cycleMode = remote.config.cycleMode || state.settings.cycleMode;
+      state.settings.hourSlots = remote.config.hourSlots || state.settings.hourSlots;
+      state.settings.grades = remote.config.grades || state.settings.grades;
+      state.settings.teacherPassword = storedPw;
+      saveLocal('settings', state.settings);
+    }
+    saveLocal('members', state.members); saveLocal('attendance', state.attendance); saveLocal('payments', state.payments);
+    markSyncPending(false);
+    state.authScreen = null;
+    checkNotices();
+    render();
+  } catch(e){
+    state.authError = t('joinFail');
+    render();
+  }
 }
-function fail(msg) { state.authError = msg; render(); }
-function logout() {
-  if (!confirm(state.pendingSync ? t('logoutPendingConfirm') : t('logoutConfirm'))) return;
-  ['teacherCode', 'role', 'pendingSync', 'members', 'attendance', 'config'].forEach(k => localStorage.removeItem(PREFIX + k));
-  Object.assign(state, { teacherCode: null, pendingSync: false, members: [], attendance: {}, config: { classes: [], teacherPassword: '' }, screen: 'main', view: 'attend', selectedClass: 'all', adding: false, welcomeMsg: '', syncStatus: '' });
+function copyTeacherCode(){
+  if(!state.teacherCode) return;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(state.teacherCode).then(function(){ state.syncStatus = t('codeCopied'); render(); }).catch(function(){});
+  }
+}
+function doLogout(){
+  saveLocal('teacherCode', null);
+  saveLocal('role', null);
+  state.teacherCode = null;
+  state.role = 'teacher';
+  markSyncPending(false);
+  state.authScreen = 'start';
+  state.screen = 'main';
   render();
 }
 
-/* ================= members & classes ================= */
-function addMember() {
-  const d = state.draft, name = d.name.trim();
-  if (!name) return;
-  state.members.push({ id: uid('m_'), name, classId: classById(d.classId) ? d.classId : null, phone: d.phone.trim(), parentPhone: d.parent.trim(), addedAt: todayISO() });
-  state.draft = { name: '', phone: '', parent: '', classId: d.classId };
-  state.adding = false; persist(); render();
+function addMember(name, phone, parentPhone){
+  name = name.trim();
+  if(!name) return;
+  const id = 'm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  state.members.push({id, name, group: state.draftGroup, exempt:false, hourSlot: state.draftHourSlot || null, grade: state.draftGrade || null, phone: (phone||'').trim(), parentPhone: (parentPhone||'').trim()});
+  persistAll();
+  state.adding = false; state.draftHourSlot = null; state.draftGrade = null;
+  render();
 }
-function deleteMember(id) {
-  const m = state.members.find(x => x.id === id);
-  if (!m || !confirm(t('deleteMemberConfirm', m.name))) return;
-  state.members = state.members.filter(x => x.id !== id);
-  Object.keys(state.attendance).forEach(d => {
-    const r = state.attendance[d];
-    r.mass = (r.mass || []).filter(i => i !== id); r.meeting = (r.meeting || []).filter(i => i !== id);
-    if (!r.mass.length && !r.meeting.length) delete state.attendance[d];
-  });
-  state.screen = 'main'; state.selectedMemberId = null; persist(); render();
+function updateMemberContact(id, field, value){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(m){ m[field] = (value||'').trim(); persistAll(); render(); }
 }
-function addClass(name) {
-  name = (name || '').trim();
-  if (!name || classes().some(c => c.name === name)) return null;
-  const c = { id: uid('c_'), name };
-  state.config.classes = [...classes(), c];
-  persist(); return c;
+function removeMember(id){
+  state.members = state.members.filter(function(m){return m.id!==id;});
+  if(state.selectedMemberId===id){ state.screen='main'; state.selectedMemberId=null; }
+  persistAll(); render();
 }
-function renameClass(id, name) {
-  name = (name || '').trim();
-  if (!name || classes().some(c => c.id !== id && c.name === name)) { render(); return; }
-  state.config.classes = classes().map(c => c.id === id ? { ...c, name } : c);
-  persist(); render();
+function moveMemberGroup(id, groupId){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(m){ m.group = groupId; m.hourSlot = null; persistAll(); render(); }
 }
-function deleteClass(id) {
-  const c = classById(id); if (!c) return;
-  const n = state.members.filter(m => m.classId === id).length;
-  if (!confirm(t('deleteClassConfirm', c.name, n))) return;
-  state.config.classes = classes().filter(x => x.id !== id);
-  state.members.forEach(m => { if (m.classId === id) m.classId = null; });
-  if (state.selectedClass === id) state.selectedClass = 'all';
-  persist(); render();
+function moveMemberHourSlot(id, slot){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(m){ m.hourSlot = slot; persistAll(); render(); }
 }
-function bulkMove(from, to) {
-  if (!from || !to || from === to) return;
-  const moved = state.members.filter(m => (from === 'none' ? !hasClass(m) : m.classId === from));
-  moved.forEach(m => { m.classId = to === 'none' ? null : to; });
-  state.statusMsg = t('bulkDone', moved.length); persist(); render();
+function getHourSlots(groupId){ return (state.settings.hourSlots && state.settings.hourSlots[groupId]) || []; }
+function addHourSlot(groupId, text){
+  text = (text||'').trim();
+  if(!text) return;
+  const list = getHourSlots(groupId);
+  if(list.includes(text)) return;
+  state.settings.hourSlots[groupId] = [...list, text];
+  persistSettings();
+  state.newHourSlotDraft[groupId] = '';
+  render();
 }
-function deleteAll() {
-  if (!confirm(t('deleteAllConfirm'))) return;
-  state.members = []; state.attendance = {}; persist(); render();
+function removeHourSlot(groupId, slot){
+  state.settings.hourSlots[groupId] = getHourSlots(groupId).filter(function(s){return s!==slot;});
+  state.members.forEach(function(m){ if(m.group===groupId && m.hourSlot===slot) m.hourSlot = null; });
+  persistSettings(); persistAll();
+  render();
+}
+function getGrades(){ return state.settings.grades || []; }
+function addGrade(name){
+  name = (name||'').trim();
+  if(!name) return;
+  const list = getGrades();
+  if(list.includes(name)) return;
+  state.settings.grades = [...list, name];
+  persistSettings();
+  render();
+}
+function removeGrade(name){
+  state.settings.grades = getGrades().filter(function(g){return g!==name;});
+  state.members.forEach(function(m){ if(m.grade===name) m.grade = null; });
+  if(state.selectedGrade===name) state.selectedGrade = 'all';
+  if(state.draftGrade===name) state.draftGrade = null;
+  persistSettings(); persistAll();
+  render();
+}
+function renameGrade(oldName, newName){
+  newName = (newName||'').trim();
+  state.renamingGrade = null;
+  if(!newName || newName===oldName){ render(); return; }
+  if(getGrades().includes(newName)) return render();
+  state.settings.grades = getGrades().map(function(g){return g===oldName?newName:g;});
+  state.members.forEach(function(m){ if(m.grade===oldName) m.grade = newName; });
+  if(state.selectedGrade===oldName) state.selectedGrade = newName;
+  if(state.draftGrade===oldName) state.draftGrade = newName;
+  persistSettings(); persistAll();
+  render();
+}
+function setMemberGrade(id, grade){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(m){ m.grade = grade; persistAll(); render(); }
+}
+function toggleExempt(id){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(m){ m.exempt = !m.exempt; persistAll(); render(); }
+}
+function isExempt(id){
+  const m = state.members.find(function(x){return x.id===id;});
+  return !!(m && m.exempt);
+}
+function toggleAttendance(id){
+  const day = state.attendance[state.selectedDate] || [];
+  state.attendance[state.selectedDate] = day.includes(id) ? day.filter(function(x){return x!==id;}) : [...day, id];
+  persistAll(); render();
+}
+function attendanceCount(id){
+  let c=0;
+  for(const date in state.attendance){ if(state.attendance[date].includes(id)) c++; }
+  return c;
+}
+function groupSessionCount(groupId){
+  const groupIds = state.members.filter(function(x){return x.group===groupId;}).map(function(x){return x.id;});
+  let c=0;
+  for(const date in state.attendance){
+    if(state.attendance[date].some(function(id){return groupIds.includes(id);})) c++;
+  }
+  return c;
+}
+function cycleCount(id){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(!m) return 0;
+  return state.settings.cycleMode==='group' ? groupSessionCount(m.group) : attendanceCount(id);
+}
+function currentCycle(id){ return Math.floor(cycleCount(id)/CYCLE_LENGTH); }
+function unpaidCycleList(id){
+  const dueCycle = currentCycle(id);
+  if(dueCycle < 1) return [];
+  const list = [];
+  for(let c=1;c<=dueCycle;c++){
+    const rec = (state.payments[id]||{})[c];
+    if(!rec || !rec.paid) list.push(c);
+  }
+  return list;
+}
+function severity(id){
+  if(isExempt(id)) return null;
+  const u = unpaidCycleList(id);
+  if(u.length===0) return null;
+  return u.length===1 ? 'orange' : 'red';
+}
+function markPaidCycle(id, cycle){
+  if(!cycle || cycle<1) return;
+  const draft = state.amountDrafts[id];
+  const amount = (draft!==undefined && draft!=='') ? Number(draft) : state.settings.fee;
+  const rec = state.payments[id] || {};
+  rec[cycle] = {paid:true, amount, paidAt: todayISO()};
+  state.payments[id] = rec;
+  persistAll(); render();
+}
+function nextUnpaidCycleNumber(id){
+  const rec = state.payments[id] || {};
+  let c = 1;
+  while(rec[c] && rec[c].paid) c++;
+  return c;
+}
+function payAdvance(id, count, amountPerCycle){
+  count = Math.max(1, Math.min(60, Math.round(Number(count)||1)));
+  const perCycle = (amountPerCycle!=null && amountPerCycle!=='') ? Number(amountPerCycle) : state.settings.fee;
+  const rec = state.payments[id] || {};
+  let c = nextUnpaidCycleNumber(id);
+  for(let i=0;i<count;i++){
+    rec[c+i] = {paid:true, amount: perCycle, paidAt: todayISO()};
+  }
+  state.payments[id] = rec;
+  state.advanceDrafts = state.advanceDrafts || {};
+  delete state.advanceDrafts[id];
+  persistAll(); render();
+}
+function markUnpaidCycle(id, cycle){
+  const rec = state.payments[id] || {};
+  const prevAmount = rec[cycle] ? rec[cycle].amount : 0;
+  rec[cycle] = {paid:false, amount: prevAmount};
+  state.payments[id] = rec;
+  persistAll(); render();
+}
+function updatePaidAmount(id, cycle, value){
+  const rec = state.payments[id] || {};
+  const current = rec[cycle] || {paid:true, amount:0};
+  current.amount = value==='' ? 0 : Number(value);
+  rec[cycle] = current;
+  state.payments[id] = rec;
+  persistAll();
+}
+function saveFeeValue(value){ state.settings.fee = value==='' ? 0 : Number(value); persistSettings(); }
+function saveTeacherPassword(value){
+  if(!isTeacher()) return;
+  value = (value||'').trim();
+  if(!value) return;
+  state.settings.teacherPassword = value;
+  persistSettings();
+  state.syncStatus = t('passwordSaved');
+  render();
+}
+function setFontSize(v){ state.settings.fontSize = v; persistSettings(); document.documentElement.style.setProperty('--scale', FONT_SCALES[v]||1); render(); }
+function setHighContrast(v){ state.settings.highContrast = v; persistSettings(); document.documentElement.classList.toggle('hc', v); render(); }
+function setLang(v){
+  state.settings.lang = v; persistSettings();
+  document.documentElement.dir = v==='en' ? 'ltr' : 'rtl';
+  document.documentElement.lang = v==='en' ? 'en' : 'ar';
+  applyBootstrapDirection();
+  render();
+}
+async function syncNow(){
+  if(!state.teacherCode) return;
+  state.syncStatus = t('syncing'); render();
+  try { await pushByCode(state.teacherCode, {members: state.members, attendance: state.attendance, payments: state.payments}); state.syncStatus = t('syncSuccess'); }
+  catch(e){ state.syncStatus = t('syncFail'); }
+  render();
+}
+function deleteEverything(){
+  if(!confirm(t('deleteConfirm'))) return;
+  state.members = []; state.attendance = {}; state.payments = {};
+  persistAll(); render();
+}
+function bulkMove(){
+  const ids = Object.keys(state.bulkSelected).filter(function(id){return state.bulkSelected[id];});
+  ids.forEach(function(id){ const m = state.members.find(function(x){return x.id===id;}); if(m) m.group = state.bulkTargetGroup; });
+  state.bulkSelected = {};
+  persistAll(); render();
 }
 
-/* ================= export / import ================= */
-function download(name, text, type) {
-  const url = URL.createObjectURL(new Blob(['\uFEFF' + text], { type: type || 'text/csv;charset=utf-8;' }));
-  const a = document.createElement('a'); a.href = url; a.download = name;
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+function getGroupMembers(){
+  let list = state.members.filter(function(m){return m.group === state.selectedGroup;});
+  if(state.selectedHourSlot !== 'all') list = list.filter(function(m){return m.hourSlot === state.selectedHourSlot;});
+  if(state.selectedGrade !== 'all') list = list.filter(function(m){return m.grade === state.selectedGrade;});
+  return list;
 }
-const csvCell = v => { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-const toCSV = rows => rows.map(r => r.map(csvCell).join(',')).join('\r\n');
-function exportSummary() {
-  const rows = [[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel'), t('addressLabel'), t('confessorLabel'), t('birthdayLabel'), t('colMass'), t('colMeeting'), t('colWeeks'), t('colPct'), t('colStreak')]];
-  const { dates, weeks } = reportRows('all');
-  sortByName(state.members).forEach(m => {
-    const s = statsFor(m, dates, weeks);
-    rows.push([m.name, className(m.classId), m.phone || '', m.parentPhone || '', m.address || '', m.confessor || '', m.birthday || '', s.mass, s.meeting, s.total, s.pct + '%', s.streak]);
+function getFilteredSorted(){
+  let list = getGroupMembers();
+  if(state.search.trim()){
+    const q = state.search.trim().toLowerCase();
+    list = list.filter(function(m){return m.name.toLowerCase().includes(q);});
+  }
+  list.sort(function(a,b){ return state.sortDir==='asc' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name); });
+  return list;
+}
+function getHistory(id){
+  const days = Object.entries(state.attendance).filter(function(e){return e[1].includes(id);}).map(function(e){return e[0];}).sort().reverse();
+  const paidCycles = Object.entries(state.payments[id] || {}).filter(function(e){return e[1] && e[1].paid;}).sort(function(a,b){return Number(b[0])-Number(a[0]);});
+  return {days, paidCycles};
+}
+function missedDays(id){
+  const m = state.members.find(function(x){return x.id===id;});
+  if(!m) return [];
+  const groupmateIds = state.members.filter(function(x){return x.group===m.group;}).map(function(x){return x.id;});
+  const missed = [];
+  Object.entries(state.attendance).forEach(function(e){
+    const date = e[0], presentIds = e[1];
+    const sessionHeld = presentIds.some(function(pid){return groupmateIds.includes(pid);});
+    if(sessionHeld && !presentIds.includes(id)) missed.push(date);
   });
-  download('attendance_summary_' + todayISO() + '.csv', toCSV(rows));
+  return missed.sort().reverse();
 }
-function exportMatrix() {
-  const weeks = buildWeeks(), dates = datesFor(state.members.map(m => m.id), weeks);
-  const rows = [[t('colName'), t('colClass'), ...dates]];
-  sortByName(state.members).forEach(m => {
-    rows.push([m.name, className(m.classId), ...dates.map(d => {
-      const a = attendedW(weeks, m.id, d, 'mass'), b = attendedW(weeks, m.id, d, 'meeting');
-      return a && b ? t('both') : a ? t('mass') : b ? t('meeting') : '-';
-    })]);
+function onDateChange(value){ if(value){ state.selectedDate = value; render(); } }
+function openDetail(id){ state.selectedMemberId = id; state.screen = 'detail'; render(); }
+
+function paymentsSummary(){
+  let total = 0;
+  const byGroup = {}; GROUPS.forEach(function(g){ byGroup[g.id] = 0; });
+  const byCycle = {};
+  state.members.forEach(function(m){
+    const rec = state.payments[m.id] || {};
+    Object.entries(rec).forEach(function(entry){
+      const cycle = entry[0], r = entry[1];
+      if(r && r.paid){
+        total += r.amount;
+        byGroup[m.group] = (byGroup[m.group]||0) + r.amount;
+        byCycle[cycle] = (byCycle[cycle]||0) + r.amount;
+      }
+    });
   });
-  download('attendance_by_week_' + todayISO() + '.csv', toCSV(rows));
+  return {total, byGroup, byCycle};
 }
-function printReport() {
-  let html = '<h1>' + esc(t('appTitle')) + '</h1><p>' + esc(fmtWeek(latestAnchor())) + '</p>';
-  const groups = classes().map(c => ({ name: c.name, sel: c.id }));
-  if (state.members.some(m => !hasClass(m))) groups.push({ name: t('noClass'), sel: 'none' });
-  groups.forEach(g => {
-    const { dates, rows } = reportRows(g.sel);
-    if (!rows.length) return;
-    html += '<h2>' + esc(g.name) + ' — ' + esc(t('weeksCount', dates.length)) + '</h2><table><tr><th>' + esc(t('colName')) + '</th><th>' + esc(t('colMass')) + '</th><th>' + esc(t('colMeeting')) + '</th><th>' + esc(t('colPct')) + '</th><th>' + esc(t('colStreak')) + '</th></tr>';
-    rows.forEach(r => { html += '<tr><td>' + esc(r.m.name) + '</td><td>' + r.mass + '/' + r.total + '</td><td>' + r.meeting + '/' + r.total + '</td><td>' + r.pct + '%</td><td>' + r.streak + '</td></tr>'; });
-    html += '</table>';
-  });
-  const el = $('#printReport'); el.innerHTML = html; el.dir = lang() === 'en' ? 'ltr' : 'rtl';
-  window.print();
+
+function memberTotalPaid(id){
+  let total = 0;
+  Object.values(state.payments[id]||{}).forEach(function(r){ if(r && r.paid) total += r.amount; });
+  return total;
 }
-function ensureXLSX() {
-  return new Promise((res, rej) => {
-    if (window.XLSX) return res();
+function memberStatusLabel(id){
+  if(isExempt(id)) return t('flagExempt');
+  const sev = severity(id);
+  if(sev==='red') return t('flagVeryOverdue');
+  if(sev==='orange') return t('flagOverdue');
+  return t('statusOk');
+}
+function ensureXLSXLoaded(){
+  return new Promise(function(resolve, reject){
+    if(window.XLSX){ resolve(); return; }
     const s = document.createElement('script');
     s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-    s.onload = () => res(); s.onerror = () => rej(new Error('xlsx'));
+    s.onload = function(){ resolve(); };
+    s.onerror = function(){ reject(new Error('load failed')); };
     document.head.appendChild(s);
   });
 }
-const pick = (row, keys) => { for (const k of keys) if (row[k] != null && String(row[k]).trim() !== '') return String(row[k]).trim(); return ''; };
-const pickRaw = (row, keys) => { for (const k of keys) if (row[k] != null && String(row[k]).trim() !== '') return row[k]; return ''; };
-function templateCSV() {
-  download('import_template.csv', toCSV([[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel'), t('addressLabel'), t('confessorLabel'), t('birthdayLabel')], [t('exampleName'), t('exampleClass'), '', '', '', '', t('exampleBirthday')]]));
+function groupIdFromLabel(label){
+  if(!label) return null;
+  label = String(label).trim();
+  for(const g of GROUPS){
+    if(label === T.ar.groupLabel[g.id] || label === T.en.groupLabel[g.id] || label === g.id) return g.id;
+  }
+  return null;
 }
-async function importFile(input) {
-  const file = input.files && input.files[0]; if (!file) return;
+function downloadImportTemplate(){
+  const header = [t('colName'), t('colGroup'), t('colHourSlot'), t('colGrade'), t('phoneLabel'), t('parentPhoneLabel')];
+  const example = [lang()==='ar'?'مثال: محمد أحمد':'e.g. John Smith', t('groupLabel')[GROUPS[0].id], '', '', '', ''];
+  const csv = [header, example].map(function(r){ return r.map(csvEscape).join(','); }).join('\r\n');
+  const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'import_template.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+async function handleImportFile(fileInput){
+  const file = fileInput.files && fileInput.files[0];
+  if(!file) return;
   state.importStatus = t('importing'); render();
   try {
-    await ensureXLSX();
-    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-    const json = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
-    let added = 0, skipped = 0;
-    json.forEach(row => {
-      const name = pick(row, ['الاسم', 'Name']); if (!name) return;
-      const cname = pick(row, ['الفصل', 'Class']);
-      let c = cname ? classes().find(x => x.name === cname) || addClass(cname) : null;
-      const classId = c ? c.id : null;
-      if (state.members.some(m => m.name === name && m.classId === classId)) { skipped++; return; }
-      state.members.push({ id: uid('m_'), name, classId, phone: pick(row, ['رقم الهاتف', 'Phone number', 'Phone']), parentPhone: pick(row, ['رقم هاتف ولي الأمر', 'Parent phone number', 'Parent phone']),
-        address: pick(row, ['العنوان', 'Address']), confessor: pick(row, ['أب الاعتراف', 'اب الاعتراف', 'Confession father', 'Confessor']),
-        birthday: parseBirthday(pickRaw(row, ['عيد الميلاد', 'تاريخ الميلاد', 'Birthday', 'Birth date'])), addedAt: todayISO() });
-      added++;
+    await ensureXLSXLoaded();
+    const data = await file.arrayBuffer();
+    const wb = XLSX.read(data, {type:'array'});
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const json = XLSX.utils.sheet_to_json(sheet, {defval:''});
+    let count = 0;
+    let settingsChanged = false;
+    json.forEach(function(row){
+      const name = String(row[t('colName')] != null ? row[t('colName')] : (row['الاسم'] || row['Name'] || '')).trim();
+      if(!name) return;
+      const groupLabelVal = row[t('colGroup')] != null ? row[t('colGroup')] : (row['المجموعة'] || row['Group'] || '');
+      const group = groupIdFromLabel(groupLabelVal) || state.selectedGroup;
+      const hourSlot = String(row[t('colHourSlot')] != null ? row[t('colHourSlot')] : (row['الموعد'] || row['Slot'] || '')).trim() || null;
+      const grade = String(row[t('colGrade')] != null ? row[t('colGrade')] : (row['الصف'] || row['Grade'] || '')).trim() || null;
+      const phone = String(row[t('phoneLabel')] != null ? row[t('phoneLabel')] : (row['رقم الهاتف'] || row['Phone number'] || '')).trim();
+      const parentPhone = String(row[t('parentPhoneLabel')] != null ? row[t('parentPhoneLabel')] : (row['رقم هاتف ولي الأمر'] || row['Parent phone number'] || '')).trim();
+      if(hourSlot && !getHourSlots(group).includes(hourSlot)){
+        state.settings.hourSlots[group] = [...getHourSlots(group), hourSlot]; settingsChanged = true;
+      }
+      if(grade && !getGrades().includes(grade)){
+        state.settings.grades = [...getGrades(), grade]; settingsChanged = true;
+      }
+      const id = 'm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)+count;
+      state.members.push({id, name, group, exempt:false, hourSlot, grade, phone, parentPhone});
+      count++;
     });
-    persist(); state.importStatus = t('importDone', added, skipped);
-  } catch (e) { state.importStatus = t('importFail'); }
-  input.value = ''; render();
-}
-
-/* ================= views ================= */
-const btnPill = (on, act, attrs, label) => '<button class="btn btn-sm rounded-pill ' + (on ? 'btn-dark active' : 'btn-outline-dark') + '" data-act="' + act + '" ' + attrs + '>' + label + '</button>';
-const langBtns = () => ['ar', 'en'].map(l => btnPill(lang() === l, 'lang', 'data-lang="' + l + '"', l === 'ar' ? 'العربية' : 'English')).join('');
-const countLabel = n => (n === 0 ? t('noMembers') : t('memberCount', n));
-
-function viewAuth() {
-  const create = state.authMode !== 'join';
-  const form = create
-    ? '<p class="small text-secondary mb-3">' + esc(t('newCodeHint')) + '</p>' +
-      '<div class="mb-3"><label class="form-label small text-secondary">' + esc(t('password')) + '</label><input id="newPw" class="form-control form-control-sm" type="password" autocomplete="new-password"></div>' +
-      '<div class="mb-3"><label class="form-label small text-secondary">' + esc(t('confirmPassword')) + '</label><input id="newPw2" class="form-control form-control-sm" type="password" autocomplete="new-password" data-enter="create-code"></div>' +
-      '<button class="btn btn-dark w-100" data-act="create-code">' + esc(t('createCodeBtn')) + '</button>'
-    : '<p class="small text-secondary mb-2">' + esc(t('joinHint')) + '</p>' +
-      '<div class="mb-3"><input id="joinCode" class="form-control form-control-sm code-input" type="text" maxlength="6" placeholder="ABC123" autocapitalize="characters" value="' + esc(state.joinCodeDraft) + '" data-draft="code" data-enter="join-code"></div>' +
-      '<div class="mb-3"><label class="form-label small text-secondary">' + esc(t('password')) + '</label><input id="joinPw" class="form-control form-control-sm" type="password" autocomplete="current-password" data-enter="join-code"></div>' +
-      '<button class="btn btn-dark w-100" data-act="join-code">' + esc(t('joinBtn')) + '</button>';
-  return '<div class="mx-auto my-4 auth-wrap"><div class="d-flex justify-content-center gap-2 mb-3">' + langBtns() + '</div>' +
-    '<div class="card card-body p-4"><h1 class="h4 text-center fw-bold mb-1">' + esc(t('appTitle')) + '</h1><p class="text-center small text-secondary mb-3">' + esc(t('appSub')) + '</p>' +
-    (state.authError ? '<div class="alert alert-danger py-2 small">' + esc(state.authError) + '</div>' : '') +
-    '<div class="d-flex justify-content-center gap-2 mb-3">' + btnPill(create, 'auth-mode', 'data-mode="create"', esc(t('newCodeTab'))) + btnPill(!create, 'auth-mode', 'data-mode="join"', esc(t('joinCodeTab'))) + '</div>' +
-    form + '</div></div>';
-}
-
-function viewMain() {
-  let h = '<div class="d-flex justify-content-between align-items-end gap-2 mb-3 pb-3 app-header"><div><h1 class="h4 fw-bold mb-0">' + esc(t('appTitle')) + '</h1><div class="small text-secondary">' + esc(countLabel(state.members.length)) + '</div></div>' +
-    '<div class="d-flex gap-1"><button class="btn btn-sm btn-dark" data-act="settings" aria-label="' + esc(t('settings')) + '">&#9881;</button><button class="btn btn-sm btn-dark" data-act="add-toggle">' + esc(t('add')) + '</button></div></div>';
-  h += '<div id="syncBanner"></div>';
-  if (state.welcomeMsg) h += '<div class="alert alert-success alert-dismissible py-2 small">' + esc(state.welcomeMsg) + '<button class="btn-close" data-act="dismiss-welcome"></button></div>';
-  if (!classes().length) return h + viewNoClasses();
-  if (state.adding) h += viewAddForm();
-  h += '<ul class="nav nav-tabs nav-fill mb-3"><li class="nav-item"><button class="nav-link ' + (state.view === 'attend' ? 'active' : '') + '" data-act="view" data-view="attend">' + esc(t('tabAttend')) + '</button></li>' +
-    '<li class="nav-item"><button class="nav-link ' + (state.view === 'report' ? 'active' : '') + '" data-act="view" data-view="report">' + esc(t('tabReport')) + '</button></li></ul>';
-  h += viewClassTabs();
-  return h + (state.view === 'attend' ? viewAttend() : viewReport());
-}
-function viewNoClasses() {
-  return '<div class="card card-body text-center py-4"><h2 class="h6 fw-semibold">' + esc(t('noClassesTitle')) + '</h2>' +
-    '<p class="small text-secondary">' + esc(t('noClassesHint')) + '</p><div class="d-flex gap-2"><input id="firstClass" class="form-control form-control-sm" placeholder="' + esc(t('classNamePh')) + '" data-enter="add-class-first"><button class="btn btn-sm btn-dark text-nowrap" data-act="add-class-first">' + esc(t('addClass')) + '</button></div></div>';
-}
-function viewAddForm() {
-  const d = state.draft;
-  return '<div class="card card-body mb-3 d-flex flex-column gap-2">' +
-    '<input id="dName" class="form-control form-control-sm" placeholder="' + esc(t('namePh')) + '" value="' + esc(d.name) + '" data-draft="name" data-enter="add-submit">' +
-    '<div class="d-flex gap-2"><input class="form-control form-control-sm" type="tel" placeholder="' + esc(t('phoneLabel')) + '" value="' + esc(d.phone) + '" data-draft="phone"><input class="form-control form-control-sm" type="tel" placeholder="' + esc(t('parentLabel')) + '" value="' + esc(d.parent) + '" data-draft="parent" data-enter="add-submit"></div>' +
-    '<div class="d-flex flex-wrap gap-2">' + classes().map(c => btnPill(d.classId === c.id, 'draft-class', 'data-id="' + esc(c.id) + '"', esc(c.name))).join('') + '</div>' +
-    '<div class="d-flex gap-2"><button class="btn btn-sm btn-dark flex-grow-1" data-act="add-submit">' + esc(t('addMember')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="add-toggle">' + esc(t('cancel')) + '</button></div></div>';
-}
-function viewClassTabs() {
-  const tab = (sel, label) => '<button class="btn btn-sm rounded-pill flex-shrink-0 ' + (state.selectedClass === sel ? 'btn-dark active' : 'btn-outline-dark') + '" data-act="class" data-sel="' + esc(sel) + '">' + esc(label) + ' <span class="opacity-75">' + membersIn(sel).length + '</span></button>';
-  let h = '<div class="class-tabs d-flex gap-2 mb-3">' + tab('all', t('all'));
-  classes().forEach(c => { h += tab(c.id, c.name); });
-  if (state.members.some(m => !hasClass(m))) h += tab('none', t('noClass'));
-  return h + '</div>';
-}
-function viewAttend() {
-  const d = state.selectedDate, cap = latestAnchor(), rtl = lang() !== 'en';
-  const nav = (act, sym, off) => '<button class="btn btn-sm btn-outline-dark" data-act="' + act + '"' + (off ? ' disabled' : '') + '>' + sym + '</button>';
-  let h = '<div class="d-flex align-items-center justify-content-center gap-2 mb-2">' +
-    nav('date-prev', rtl ? '&#8594;' : '&#8592;', false) + '<span class="fw-bold text-center date-label">' + (meetingOffset() === 0 ? '<span class="d-block">' + esc(fmtDay(d)) + '</span>' : '<span class="d-block small">' + esc(t('mass')) + ': ' + esc(fmtDay(d)) + '</span><span class="d-block small">' + esc(t('meeting')) + ': ' + esc(fmtDay(meetingDateOf(d))) + '</span>') + '</span>' + nav('date-next', rtl ? '&#8592;' : '&#8594;', d >= cap) +
-    '<span class="position-relative"><button class="btn btn-sm btn-dark cal-btn" tabindex="-1" type="button">&#128197;</button><input class="cal-input" type="date" value="' + d + '" max="' + todayISO() + '" data-change="date-pick" aria-label="' + esc(t('pickDate')) + '"></span></div>';
-  h += '<div class="small text-secondary text-center mb-2">' + esc(t('daysNote', DAY_NAMES[lang()][massDay()], DAY_NAMES[lang()][meetingDay()])) + (d === cap ? '' : ' · <a href="#" data-act="date-today">' + esc(t('goLatest')) + '</a>') + '</div>';
-  h += '<div class="d-flex gap-2 mb-2"><div class="input-group input-group-sm"><span class="input-group-text">&#128269;</span><input id="searchBox" class="form-control" placeholder="' + esc(t('searchPh')) + '" value="' + esc(state.search) + '" data-input="search"></div>' +
-    '<button class="btn btn-sm btn-outline-dark text-nowrap" data-act="sort">' + esc(state.sortDir === 'asc' ? t('sortAsc') : t('sortDesc')) + '</button></div>';
-  return h + '<div id="listArea">' + viewList() + '</div>';
-}
-function viewList() {
-  const all = membersIn(state.selectedClass), q = state.search.trim().toLowerCase();
-  const list = sortByName(all).filter(m => !q || m.name.toLowerCase().includes(q));
-  const weeks = buildWeeks(), e = weeks.get(state.selectedDate) || EMPTY_WEEK;
-  const mc = all.filter(m => e.mass.has(m.id)).length, sc = all.filter(m => e.meeting.has(m.id)).length;
-  let h = '<div class="d-flex gap-2 mb-2"><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('mass')) + ' ' + mc + '/' + all.length + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('meeting')) + ' ' + sc + '/' + all.length + '</span></div>';
-  if (!list.length) return h + '<div class="text-center text-secondary small py-4">' + esc(t('emptyList')) + '</div>';
-  h += '<ul class="list-group list-group-flush border-top">';
-  list.forEach((m, i) => {
-    const tg = (kind, on) => {
-      const future = (kind === 'mass' ? state.selectedDate : meetingDateOf(state.selectedDate)) > todayISO() && !on;   // not happened yet
-      return '<button class="btn btn-sm rounded-pill att-toggle ' + (on ? 'btn-dark active' : 'btn-outline-dark') + '" data-act="toggle" data-kind="' + kind + '" data-id="' + esc(m.id) + '" aria-pressed="' + on + '"' + (future ? ' disabled title="' + esc(t('notYet')) + '"' : '') + '>' + (on ? '&#10003; ' : '') + esc(t(kind)) + '</button>';
-    };
-    h += '<li class="list-group-item d-flex align-items-center gap-2 px-1"><span class="seq">' + (i + 1) + '</span>' +
-      '<button class="btn btn-link text-decoration-none text-body text-start p-0 flex-grow-1 fw-medium d-flex align-items-center gap-1 min-w-0" data-act="open" data-id="' + esc(m.id) + '"><span class="text-truncate">&#128100; ' + esc(m.name) + '</span>' + cake(m) + '</button>' +
-      tg('mass', e.mass.has(m.id)) + tg('meeting', e.meeting.has(m.id)) + '</li>';
-  });
-  return h + '</ul>';
-}
-function viewReport() {
-  const { dates, rows } = reportRows(state.selectedClass);
-  if (!rows.length) return '<div class="text-center text-secondary small py-4">' + esc(t('emptyList')) + '</div>';
-  if (!dates.length) return '<div class="text-center text-secondary small py-4">' + esc(t('noRecorded')) + '</div>';
-  let h = '<div class="small text-secondary mb-2">' + esc(t('weeksCount', dates.length)) + '</div><div class="table-responsive"><table class="table table-sm align-middle mb-2"><thead><tr><th>' + esc(t('colName')) + '</th><th class="text-center">' + esc(t('colMass')) + '</th><th class="text-center">' + esc(t('colMeeting')) + '</th><th class="text-center">' + esc(t('colPct')) + '</th><th class="text-center">' + esc(t('colStreak')) + '</th></tr></thead><tbody>';
-  rows.forEach(r => {
-    h += '<tr><td><button class="btn btn-link text-decoration-none text-body text-start p-0 fw-medium" data-act="open" data-id="' + esc(r.m.id) + '">' + esc(r.m.name) + cake(r.m) + '</button></td><td class="text-center">' + r.mass + '/' + r.total + '</td><td class="text-center">' + r.meeting + '/' + r.total + '</td><td class="text-center">' + r.pct + '%</td><td class="text-center">' +
-      (r.streak >= STREAK_ALERT ? '<span class="badge rounded-pill flag-red">' + r.streak + '</span>' : r.streak) + '</td></tr>';
-  });
-  return h + '</tbody></table></div><p class="small text-secondary">' + esc(t('streakHint', STREAK_ALERT)) + '</p>';
-}
-
-function viewDetail() {
-  const m = state.members.find(x => x.id === state.selectedMemberId);
-  if (!m) { state.screen = 'main'; return viewMain(); }
-  const weeks = buildWeeks(), dates = datesFor(membersIn(hasClass(m) ? m.classId : 'none').map(x => x.id), weeks);
-  const s = statsFor(m, dates, weeks), rows = s.dates.slice().reverse();
-  const flag = (on, label) => '<span class="badge rounded-pill ' + (on ? 'flag-ok' : 'flag-bad') + '">' + (on ? '&#10003; ' : '&#10007; ') + esc(label) + '</span>';
-  const phone = (field, label) => '<p class="small text-secondary mb-1">' + esc(label) + '</p><div class="d-flex gap-2 align-items-center mb-2"><input class="form-control form-control-sm" type="tel" value="' + esc(m[field] || '') + '" placeholder="' + esc(t('noNumber')) + '" data-change="contact" data-field="' + field + '" data-id="' + esc(m.id) + '">' +
-    (m[field] ? '<a class="btn btn-sm btn-outline-dark text-nowrap" href="tel:' + esc(m[field]) + '">' + esc(t('call')) + '</a>' : '') + '</div>';
-  const info = (field, label, type, ph) => '<p class="small text-secondary mb-1">' + esc(label) + '</p><input class="form-control form-control-sm mb-2" type="' + type + '" value="' + esc(m[field] || '') + '" placeholder="' + esc(ph || '') + '" data-change="contact" data-field="' + field + '" data-id="' + esc(m.id) + '">';
-  return '<button class="btn btn-sm btn-outline-dark mb-3" data-act="back">' + esc(t('back')) + '</button><div id="syncBanner"></div>' +
-    '<h2 class="h4 fw-bold mb-3">' + esc(m.name) + cake(m) + '</h2>' +
-    '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('classSection')) + '</h3><div class="d-flex flex-wrap gap-2">' +
-      btnPill(!hasClass(m), 'move-class', 'data-id="' + esc(m.id) + '" data-class=""', esc(t('noClass'))) + classes().map(c => btnPill(m.classId === c.id, 'move-class', 'data-id="' + esc(m.id) + '" data-class="' + esc(c.id) + '"', esc(c.name))).join('') + '</div></div>' +
-    '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('contactSection')) + '</h3>' + phone('phone', t('phoneLabel')) + phone('parentPhone', t('parentLabel')) + '</div>' +
-    '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('infoSection')) + '</h3>' +
-      info('address', t('addressLabel'), 'text', t('addressLabel')) + info('confessor', t('confessorLabel'), 'text', t('confessorPh')) +
-      '<p class="small text-secondary mb-1">' + esc(t('birthdayLabel')) + '</p><input class="form-control form-control-sm" type="date" value="' + esc(m.birthday || '') + '" max="' + todayISO() + '" data-change="contact" data-field="birthday" data-id="' + esc(m.id) + '">' +
-      (m.birthday && parseBirthday(m.birthday) ? '<p class="small text-secondary mt-1 mb-0">' + esc(t('birthdayOn', fmtShort(m.birthday))) + (birthdayThisMonth(m) ? ' &#127874; ' + esc(t('birthdayMonth')) : '') + '</p>' : '') + '</div>' +
-    '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">' + esc(t('historySection')) + '</h3>' +
-      (s.total ? '<div class="d-flex flex-wrap gap-2 mb-2"><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('mass')) + ' ' + s.mass + '/' + s.total + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + esc(t('meeting')) + ' ' + s.meeting + '/' + s.total + '</span><span class="badge rounded-pill text-bg-light border fw-normal">' + s.pct + '%</span></div>' +
-        '<ul class="list-group list-group-flush border-top">' + rows.map(d => '<li class="list-group-item d-flex align-items-center gap-2 px-1 small"><span class="flex-grow-1">' + esc(fmtWeek(d)) + '</span>' + flag(attendedW(weeks, m.id, d, 'mass'), t('mass')) + flag(attendedW(weeks, m.id, d, 'meeting'), t('meeting')) + '</li>').join('') + '</ul>'
-        : '<p class="small text-secondary mb-0">' + esc(t('noRecorded')) + '</p>') + '</div>' +
-    '<button class="btn btn-sm btn-outline-danger" data-act="delete-member" data-id="' + esc(m.id) + '">' + esc(t('deleteMember')) + '</button>';
-}
-
-function viewSettings() {
-  const sec = (title, body, last) => '<div class="' + (last ? 'mb-3' : 'mb-3 pb-3 border-bottom') + '"><h3 class="h6 fw-semibold">' + esc(title) + '</h3>' + body + '</div>';
-  const classOpts = (withNone, sel) => '<option value="">—</option>' + classes().map(c => '<option value="' + esc(c.id) + '"' + (sel === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + (withNone ? '<option value="none"' + (sel === 'none' ? ' selected' : '') + '>' + esc(t('noClass')) + '</option>' : '');
-  let h = '<button class="btn btn-sm btn-outline-dark mb-3" data-act="back">' + esc(t('back')) + '</button><div id="syncBanner"></div><h2 class="h4 fw-bold mb-3">' + esc(t('settings')) + '</h2>';
-  h += sec(t('accountTitle'), '<p class="small text-secondary mb-1">' + esc(t('codeLabel')) + '</p><div class="d-flex flex-wrap align-items-center gap-2"><span class="badge border fw-normal code-badge">' + esc(state.teacherCode || '') + '</span>' + '<button class="btn btn-sm btn-outline-dark" data-act="copy-code">' + esc(t('copyCode')) + '</button></div>' +
-    '<p id="syncStatusLine" class="small text-secondary mt-1 mb-0"></p><div class="d-flex flex-wrap gap-2 mt-2"><button class="btn btn-sm btn-outline-dark" data-act="sync-now">' + esc(t('syncNow')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="logout">' + esc(t('logout')) + '</button></div>');
-  h += sec(t('passwordTitle'), '<p class="small text-secondary">' + esc(t('passwordHint')) + '</p><div class="d-flex gap-2"><input id="newTeacherPw" class="form-control form-control-sm" type="password" placeholder="' + esc(t('password')) + '" data-enter="save-password"><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="save-password">' + esc(t('save')) + '</button></div>');
-  const dayOpts = cur => DAY_NAMES[lang()].map((n, i) => '<option value="' + i + '"' + (cur === i ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
-  h += sec(t('daysTitle'), '<p class="small text-secondary">' + esc(t('daysHint')) + '</p><div class="d-flex gap-2"><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('massDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="mass">' + dayOpts(massDay()) + '</select></div><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('meetingDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="meeting">' + dayOpts(meetingDay()) + '</select></div></div>');
-  h += sec(t('languageTitle'), '<div class="d-flex flex-wrap gap-2">' + langBtns() + '</div>');
-  h += sec(t('fontTitle'), '<div class="d-flex flex-wrap gap-2">' + ['small', 'medium', 'large'].map(k => btnPill(state.settings.fontSize === k, 'font', 'data-size="' + k + '"', esc(t(k)))).join('') + '</div><label class="d-flex align-items-center gap-2 small mt-2"><input class="form-check-input mt-0" type="checkbox" ' + (state.settings.highContrast ? 'checked' : '') + ' data-change="contrast"> ' + esc(t('highContrast')) + '</label>');
-  {
-    h += sec(t('classesTitle'), '<p class="small text-secondary">' + esc(t('classesHint')) + '</p>' +
-      (classes().length ? '<ul class="list-group list-group-flush mb-2">' + classes().map(c => '<li class="list-group-item d-flex gap-2 px-0"><input class="form-control form-control-sm" value="' + esc(c.name) + '" data-change="rename-class" data-id="' + esc(c.id) + '"><button class="btn btn-sm btn-outline-danger" data-act="delete-class" data-id="' + esc(c.id) + '" aria-label="' + esc(t('delete')) + '">&times;</button></li>').join('') + '</ul>' : '') +
-      '<div class="d-flex gap-2"><input id="newClass" class="form-control form-control-sm" placeholder="' + esc(t('classNamePh')) + '" data-enter="add-class"><button class="btn btn-sm btn-dark text-nowrap" data-act="add-class">' + esc(t('addClass')) + '</button></div>');
-    h += sec(t('bulkTitle'), '<p class="small text-secondary">' + esc(t('bulkHint')) + '</p><div class="d-flex gap-2 align-items-center"><select id="bulkFrom" class="form-select form-select-sm">' + classOpts(true, state.bulkFrom) + '</select><span>&#8594;</span><select id="bulkTo" class="form-select form-select-sm">' + classOpts(true, state.bulkTo) + '</select><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="bulk-move">' + esc(t('bulkBtn')) + '</button></div>' + (state.statusMsg ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.statusMsg) + '</p>' : ''));
+    if(settingsChanged){ saveLocal('settings', state.settings); }
+    persistAll();
+    state.importStatus = t('importDone')(count);
+  } catch(e){
+    state.importStatus = t('importFail');
   }
-  h += sec(t('importTitle'), '<p class="small text-secondary">' + esc(t('importHint')) + '</p><input id="importFile" type="file" accept=".xlsx,.xls,.csv" class="d-none" data-change="import"><div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="import-pick">' + esc(t('importBtn')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="template">' + esc(t('templateBtn')) + '</button></div>' + (state.importStatus ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.importStatus) + '</p>' : ''));
-  h += sec(t('exportTitle'), '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="export-summary">' + esc(t('exportSummary')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-matrix">' + esc(t('exportMatrix')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="print">' + esc(t('printBtn')) + '</button></div>');
-  h += sec(t('deleteAllTitle'), '<p class="small text-secondary">' + esc(t('deleteAllHint')) + '</p><button class="btn btn-sm btn-outline-danger" data-act="delete-all">' + esc(t('deleteAllBtn')) + '</button>', true);
+  fileInput.value = '';
+  render();
+}
+function csvEscape(v){
+  const s = String(v==null?'':v);
+  return /[",\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+function exportCSV(){
+  const rows = [[t('colName'), t('colGroup'), t('colHourSlot'), t('colGrade'), t('phoneLabel'), t('parentPhoneLabel'), t('colExempt'), t('colAttendance'), t('colCycle'), t('colStatus'), t('colPaid')]];
+  state.members.forEach(function(m){
+    rows.push([
+      m.name, t('groupLabel')[m.group], m.hourSlot || '-', m.grade || '-', m.phone || '-', m.parentPhone || '-',
+      m.exempt ? t('yesLabel') : t('noLabel'),
+      attendanceCount(m.id), currentCycle(m.id), memberStatusLabel(m.id), memberTotalPaid(m.id)
+    ]);
+  });
+  const csv = rows.map(function(r){ return r.map(csvEscape).join(','); }).join('\r\n');
+  const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'attendance_'+todayISO()+'.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function exportPDF(){
+  const summary = paymentsSummary();
+  let html = '<h1>'+t('appTitle')+'</h1><h2>'+t('summaryTitle')+'</h2><table>';
+  html += '<tr><td>'+t('summaryTotal')+'</td><td>'+summary.total+' ج.م</td></tr>';
+  GROUPS.forEach(function(g){ html += '<tr><td>'+t('groupLabel')[g.id]+'</td><td>'+(summary.byGroup[g.id]||0)+' ج.م</td></tr>'; });
+  html += '</table><h2>'+t('exportTitle')+'</h2><table><tr><th>'+t('colName')+'</th><th>'+t('colGroup')+'</th><th>'+t('colAttendance')+'</th><th>'+t('colStatus')+'</th><th>'+t('colPaid')+'</th></tr>';
+  state.members.forEach(function(m){
+    html += '<tr><td>'+esc(m.name)+'</td><td>'+t('groupLabel')[m.group]+'</td><td>'+attendanceCount(m.id)+'</td><td>'+memberStatusLabel(m.id)+'</td><td>'+memberTotalPaid(m.id)+'</td></tr>';
+  });
+  html += '</table>';
+  const el = document.getElementById('printReport');
+  el.innerHTML = html;
+  el.dir = lang()==='en' ? 'ltr' : 'rtl';
+  window.print();
+}
+
+// ---- Rendering ----
+function renderAuth(){
+  let html = '<div class="mx-auto my-5 px-3 att-authwrap"><div class="d-flex justify-content-center gap-2 mb-3">';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(lang()==='ar'?'active':'')+'" onclick="setLang(\'ar\')">العربية</button>';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(lang()==='en'?'active':'')+'" onclick="setLang(\'en\')">English</button>';
+  html += '</div><div class="card card-body p-4">';
+  html += '<h2 class="h4 text-center fw-bold mb-3">'+t('appTitle')+'</h2>';
+  if(state.authError) html += '<div class="alert alert-danger py-2 small">'+esc(state.authError)+'</div>';
+  html += '<div class="d-flex flex-wrap gap-2" style="justify-content:center;margin-bottom:14px">';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.authMode!=='join'?'active':'')+'" onclick="state.authMode=\'create\'; state.authError=\'\'; render();">'+t('newCodeTab')+'</button>';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.authMode==='join'?'active':'')+'" onclick="state.authMode=\'join\'; state.authError=\'\'; render();">'+t('joinCodeTab')+'</button>';
+  html += '</div>';
+  if(state.authMode==='join'){
+    html += '<p class="small text-secondary" style="margin-bottom:8px">'+t('joinCodeHint')+'</p>';
+    html += '<div class="mb-3"><input id="joinCodeInput" class="form-control form-control-sm" type="text" style="text-align:center;font-size:1.3rem;letter-spacing:3px;text-transform:uppercase" maxlength="6" placeholder="ABC123" value="'+esc(state.joinCodeDraft||'')+'" oninput="state.joinCodeDraft=this.value"></div>';
+    html += '<div class="d-flex flex-wrap gap-2" style="margin-bottom:10px"><button class="btn btn-sm rounded-pill btn-outline-dark '+(state.joinRole!=='assistant'?'active':'')+'" onclick="state.joinRole=\'teacher\'; render();">'+t('joinAsTeacherTab')+'</button>';
+    html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.joinRole==='assistant'?'active':'')+'" onclick="state.joinRole=\'assistant\'; render();">'+t('joinAsAssistantTab')+'</button></div>';
+    if(state.joinRole!=='assistant'){
+      html += '<div class="mb-3"><label class="form-label small text-secondary">'+t('password')+'</label><input id="joinPasswordInput" class="form-control form-control-sm" type="password" onkeydown="if(event.key==\'Enter\') joinWithCode(document.getElementById(\'joinCodeInput\').value, this.value)"></div>';
+    }
+    html += '<button class="btn btn-dark w-100 mt-1" onclick="joinWithCode(document.getElementById(\'joinCodeInput\').value, document.getElementById(\'joinPasswordInput\')?document.getElementById(\'joinPasswordInput\').value:\'\')">'+t('joinBtn')+'</button>';
+  } else {
+    html += '<p class="small text-secondary" style="margin-bottom:12px">'+t('newCodeHint')+'</p>';
+    html += '<div class="mb-3"><label class="form-label small text-secondary">'+t('password')+'</label><input id="newPasswordInput" class="form-control form-control-sm" type="password"></div>';
+    html += '<div class="mb-3"><label class="form-label small text-secondary">'+t('confirmPassword')+'</label><input id="newPasswordConfirmInput" class="form-control form-control-sm" type="password" onkeydown="if(event.key==\'Enter\') createNewCode(document.getElementById(\'newPasswordInput\').value, this.value)"></div>';
+    html += '<button class="btn btn-dark w-100 mt-1" onclick="createNewCode(document.getElementById(\'newPasswordInput\').value, document.getElementById(\'newPasswordConfirmInput\').value)">'+t('createCodeBtn')+'</button>';
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function renderHeader(){
+  let h = '<div class="d-flex justify-content-between align-items-end gap-2 mb-3 pb-3 att-header"><div><p class="h4 fw-bold mb-0">'+t('appTitle')+'</p><p class="small text-secondary">'+t('memberCount')(state.members.length)+'</p></div>';
+  h += '<div class="d-flex gap-1">';
+  h += '<button class="btn btn-sm btn-dark '+(state.showGrades?'active':'')+'" onclick="state.showGrades=!state.showGrades; if(!state.showGrades){state.selectedGrade=\'all\'; state.gradesEditMode=false; state.renamingGrade=null;} render();" style="'+(state.showGrades?'background:var(--focus)':'')+'">&#127891;</button>';
+  h += '<button class="btn btn-sm btn-dark" onclick="state.screen=\'settings\'; render();">&#9881;</button>';
+  h += '<button class="btn btn-sm btn-dark" onclick="state.draftGroup=state.selectedGroup; state.adding=!state.adding; render();">'+t('add')+'</button>';
+  h += '</div></div>';
   return h;
 }
 
-function render() {
-  const app = $('#app'), y = window.scrollY;
-  if (!state.ready) { app.innerHTML = '<div class="text-center text-secondary py-5">' + esc(t('loading')) + '</div>'; return; }
-  app.innerHTML = !state.teacherCode ? viewAuth() : state.screen === 'settings' ? viewSettings() : state.screen === 'detail' ? viewDetail() : viewMain();
-  refreshSyncUI(); window.scrollTo(0, y);
-}
-function renderList() { const el = $('#listArea'); if (el) el.innerHTML = viewList(); }
-
-/* ================= events (one delegated listener per kind) ================= */
-function setPrefs(patch) { state.settings = { ...state.settings, ...patch }; save('settings', state.settings); applyPrefs(); render(); }
-const val = id => { const el = document.getElementById(id); return el ? el.value : ''; };
-function act(name, el) {
-  const d = el.dataset;
-  switch (name) {
-    case 'lang': return setPrefs({ lang: d.lang });
-    case 'auth-mode': state.authMode = d.mode; state.authError = ''; return render();
-    case 'create-code': return createCode(val('newPw'), val('newPw2'));
-    case 'join-code': return joinCode(val('joinCode'), val('joinPw'));
-    case 'logout': return logout();
-    case 'settings': state.screen = 'settings'; state.statusMsg = ''; return render();
-    case 'back': state.screen = 'main'; return render();
-    case 'dismiss-welcome': state.welcomeMsg = ''; return render();
-    case 'add-toggle':
-      state.adding = !state.adding;
-      if (state.adding && !classById(state.draft.classId)) state.draft.classId = classById(state.selectedClass) ? state.selectedClass : (classes()[0] || {}).id || null;
-      if (state.adding && classById(state.selectedClass)) state.draft.classId = state.selectedClass;
-      return render();
-    case 'draft-class': state.draft.classId = d.id; return render();
-    case 'add-submit': return addMember();
-    case 'add-class-first': { const c = addClass(val('firstClass')); if (c) { state.selectedClass = 'all'; } return render(); }
-    case 'add-class': addClass(val('newClass')); return render();
-    case 'delete-class': return deleteClass(d.id);
-    case 'bulk-move': state.bulkFrom = val('bulkFrom'); state.bulkTo = val('bulkTo'); return bulkMove(state.bulkFrom, state.bulkTo);
-    case 'view': state.view = d.view; return render();
-    case 'class': state.selectedClass = d.sel; return render();
-    case 'sort': state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc'; return render();
-    case 'date-prev': state.selectedDate = addDays(state.selectedDate, -7); return render();
-    case 'date-next': if (state.selectedDate < latestAnchor()) state.selectedDate = addDays(state.selectedDate, 7); return render();
-    case 'date-today': state.selectedDate = latestAnchor(); return render();
-    case 'toggle': return toggleAtt(d.id, d.kind);
-    case 'open': state.selectedMemberId = d.id; state.screen = 'detail'; return render();
-    case 'move-class': { const m = state.members.find(x => x.id === d.id); if (m) { m.classId = d.class || null; persist(); render(); } return; }
-    case 'delete-member': return deleteMember(d.id);
-    case 'font': return setPrefs({ fontSize: d.size });
-    case 'copy-code': if (navigator.clipboard) navigator.clipboard.writeText(state.teacherCode).then(() => { state.syncStatus = t('codeCopied'); refreshSyncUI(); }); return;
-    case 'sync-now': state.syncStatus = t('syncing'); refreshSyncUI(); return pushNow();
-    case 'save-password': { const p = val('newTeacherPw').trim(); if (!p) return; state.config.teacherPassword = p; persist(); state.syncStatus = t('passwordSaved'); render(); return; }
-    case 'import-pick': return $('#importFile').click();
-    case 'template': return templateCSV();
-    case 'export-summary': return exportSummary();
-    case 'export-matrix': return exportMatrix();
-    case 'print': return printReport();
-    case 'delete-all': return deleteAll();
+function renderNotices(){
+  let html = '';
+  if(state.pendingSync){
+    html += '<div class="alert alert-danger alert-dismissible py-2 small">'+esc(t('pendingSyncBanner'))+'</div>';
   }
-}
-document.addEventListener('click', e => {
-  const el = e.target.closest('[data-act]'); if (!el) return;
-  if (el.tagName === 'A') e.preventDefault();
-  act(el.dataset.act, el);
-});
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Enter') return;
-  const el = e.target.closest('[data-enter]'); if (el) { e.preventDefault(); act(el.dataset.enter, el); }
-});
-document.addEventListener('input', e => {
-  const el = e.target, d = el.dataset;
-  if (d.input === 'search') { state.search = el.value; renderList(); }
-  else if (d.draft === 'code') state.joinCodeDraft = el.value;
-  else if (d.draft === 'name') state.draft.name = el.value;
-  else if (d.draft === 'phone') state.draft.phone = el.value;
-  else if (d.draft === 'parent') state.draft.parent = el.value;
-});
-document.addEventListener('change', e => {
-  const el = e.target, d = el.dataset;
-  switch (d.change) {
-    case 'date-pick': if (el.value) { state.selectedDate = weekOf(el.value); normalizeSelected(); render(); } break;
-    case 'set-day': state.config[d.which === 'mass' ? 'massDay' : 'meetingDay'] = +el.value; normalizeSelected(); persist(); render(); break;
-    case 'contact': { const m = state.members.find(x => x.id === d.id); if (m) { m[d.field] = d.field === 'birthday' ? parseBirthday(el.value) : el.value.trim(); persist(); render(); } break; }
-    case 'rename-class': renameClass(d.id, el.value); break;
-    case 'contrast': setPrefs({ highContrast: el.checked }); break;
-    case 'import': importFile(el); break;
+  if(state.welcomeMsg){
+    html += '<div class="alert alert-success alert-dismissible py-2 small"><button class="btn-close" onclick="state.welcomeMsg=\'\'; render();"></button>'+esc(state.welcomeMsg)+'</div>';
   }
-});
+  if(state.monthlySummaryMsg){
+    html += '<div class="alert alert-success alert-dismissible py-2 small"><button class="btn-close" onclick="state.monthlySummaryMsg=\'\'; render();"></button>'+esc(state.monthlySummaryMsg)+'</div>';
+  }
+  if(!state.dismissedSevere){
+    const severe = state.members.filter(function(m){return severity(m.id)==='red';});
+    if(severe.length > 0){
+      html += '<div class="alert alert-danger alert-dismissible py-2 small"><button class="btn-close" onclick="state.dismissedSevere=true; render();"></button>';
+      html += '<div class="fw-bold mb-1">'+t('severeOverdue')(severe.length)+'</div>';
+      html += '<div class="d-flex flex-wrap gap-1 mt-1 att-chips">'+severe.map(function(m){return '<span class="badge border fw-normal att-chip clickable" onclick="openDetail(\''+m.id+'\')">'+esc(m.name)+'</span>';}).join('')+'</div></div>';
+    }
+  }
+  return html;
+}
 
-init();
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+function renderGradesBar(){
+  if(!state.showGrades) return '';
+  const grades = getGrades();
+  let html = '<div class="d-flex flex-wrap gap-2" style="margin-bottom:8px">';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.selectedGrade==='all'&&!state.gradesEditMode?'active':'')+'" onclick="'+(state.gradesEditMode?'':'state.selectedGrade=\'all\'; render();')+'">'+t('gradesAll')+'</button>';
+  grades.forEach(function(g){
+    if(state.gradesEditMode){
+      if(state.renamingGrade===g){
+        html += '<span class="att-gradechip"><input type="text" value="'+esc(g)+'" autofocus onkeydown="if(event.key==\'Enter\') renameGrade(\''+esc(g)+'\', this.value); if(event.key==\'Escape\'){state.renamingGrade=null; render();}" onblur="renameGrade(\''+esc(g)+'\', this.value)"></span>';
+      } else {
+        html += '<span class="att-gradechip"><span class="nm" onclick="state.renamingGrade=\''+esc(g)+'\'; render();">'+esc(g)+'</span><span class="del" onclick="removeGrade(\''+esc(g)+'\')">&times;</span></span>';
+      }
+    } else {
+      html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.selectedGrade===g?'active':'')+'" onclick="state.selectedGrade=\''+esc(g)+'\'; render();">'+esc(g)+'</button>';
+    }
+  });
+  if(isTeacher()){
+    html += '<button class="btn btn-sm rounded-pill btn-outline-dark" onclick="state.gradesEditMode=!state.gradesEditMode; state.renamingGrade=null; render();">'+(state.gradesEditMode?t('doneEditing'):t('editGrades'))+'</button>';
+  }
+  html += '</div>';
+  if(state.gradesEditMode && isTeacher()){
+    html += '<div class="d-flex gap-2" style="display:flex;gap:6px;margin-bottom:10px"><input id="newGradeInput" class="form-control form-control-sm" style="margin-top:0" type="text" placeholder="'+t('gradePlaceholder')+'" onkeydown="if(event.key==\'Enter\'){addGrade(this.value); this.value=\'\';}">';
+    html += '<button class="btn btn-sm btn-outline-dark" onclick="addGrade(document.getElementById(\'newGradeInput\').value); document.getElementById(\'newGradeInput\').value=\'\';">'+t('addGradeBtn')+'</button></div>';
+  }
+  return html;
+}
+
+function renderMain(){
+  const filteredSorted = getFilteredSorted();
+  const presentToday = state.attendance[state.selectedDate] || [];
+  const presentInGroup = filteredSorted.filter(function(m){return presentToday.includes(m.id);}).length;
+  const nonExempt = filteredSorted.filter(function(m){return !isExempt(m.id);});
+  const exemptMembers = filteredSorted.filter(function(m){return isExempt(m.id);});
+  const dueMembers = nonExempt.filter(function(m){return currentCycle(m.id) > 0;});
+  const notDueMembers = nonExempt.filter(function(m){return currentCycle(m.id) === 0;});
+  const paidList = dueMembers.filter(function(m){return severity(m.id) === null;});
+  const unpaidList = dueMembers.filter(function(m){return severity(m.id) !== null;});
+
+  let html = renderHeader();
+  html += renderNotices();
+  html += renderGradesBar();
+
+  if(state.adding){
+    html += '<div class="d-flex flex-column gap-2 mb-3"><div class="d-flex gap-2"><input class="form-control form-control-sm" type="text" id="newNameInput" autofocus placeholder="'+t('namePlaceholder')+'" onkeydown="if(event.key==\'Enter\') document.getElementById(\'newPhoneInput\').focus(); if(event.key==\'Escape\'){state.adding=false; render();}">';
+    html += '<button class="btn btn-sm btn-dark" onclick="addMember(document.getElementById(\'newNameInput\').value, document.getElementById(\'newPhoneInput\').value, document.getElementById(\'newParentPhoneInput\').value)">+</button></div>';
+    html += '<div class="d-flex gap-2"><input type="tel" id="newPhoneInput" placeholder="'+t('phoneLabel')+'" class="form-control form-control-sm">';
+    html += '<input type="tel" id="newParentPhoneInput" placeholder="'+t('parentPhoneLabel')+'" onkeydown="if(event.key==\'Enter\') addMember(document.getElementById(\'newNameInput\').value, document.getElementById(\'newPhoneInput\').value, this.value)" class="form-control form-control-sm"></div>';
+    html += '<div class="d-flex flex-wrap gap-2">';
+    GROUPS.forEach(function(g){ html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.draftGroup===g.id?'active':'')+'" onclick="state.draftGroup=\''+g.id+'\'; state.draftHourSlot=null; render();">'+t('groupLabel')[g.id]+'</button>'; });
+    html += '</div>';
+    const draftSlots = getHourSlots(state.draftGroup);
+    if(draftSlots.length > 0){
+      html += '<div class="d-flex flex-wrap gap-2">';
+      html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(!state.draftHourSlot?'active':'')+'" onclick="state.draftHourSlot=null; render();">'+t('noHourSlot')+'</button>';
+      draftSlots.forEach(function(slot){
+        html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.draftHourSlot===slot?'active':'')+'" onclick="state.draftHourSlot=\''+esc(slot)+'\'; render();">'+esc(slot)+'</button>';
+      });
+      html += '</div>';
+    }
+    const gList = getGrades();
+    if(gList.length > 0){
+      html += '<div class="d-flex flex-wrap gap-2">';
+      html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(!state.draftGrade?'active':'')+'" onclick="state.draftGrade=null; render();">'+t('noGrade')+'</button>';
+      gList.forEach(function(g){ html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.draftGrade===g?'active':'')+'" onclick="state.draftGrade=\''+esc(g)+'\'; render();">'+esc(g)+'</button>'; });
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  html += '<div class="d-flex gap-2 mb-2">';
+  GROUPS.forEach(function(g){
+    const cnt = state.members.filter(function(m){return m.group===g.id;}).length;
+    html += '<button class="btn btn-outline-dark flex-fill d-flex flex-column align-items-center py-2 att-grouptab '+(state.selectedGroup===g.id?'active':'')+'" onclick="state.selectedGroup=\''+g.id+'\'; state.selectedHourSlot=\'all\'; render();">';
+    html += '<span class="n">'+cnt+'</span><span>'+t('groupLabel')[g.id]+'</span></button>';
+  });
+  html += '</div>';
+  const curGroup = GROUPS.find(function(g){return g.id===state.selectedGroup;});
+  html += '<div class="small text-secondary mb-2">'+t('groupDaysPrefix')+' '+groupDaysLabel(curGroup)+'</div>';
+
+  const curSlots = getHourSlots(state.selectedGroup);
+  if(curSlots.length > 0){
+    html += '<div class="d-flex flex-wrap gap-2" style="margin-bottom:12px">';
+    html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.selectedHourSlot==='all'?'active':'')+'" onclick="state.selectedHourSlot=\'all\'; render();">'+t('allHours')+'</button>';
+    curSlots.forEach(function(slot){
+      html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.selectedHourSlot===slot?'active':'')+'" onclick="state.selectedHourSlot=\''+esc(slot)+'\'; render();">'+esc(slot)+'</button>';
+    });
+    html += '</div>';
+  }
+
+  html += '<div class="nav nav-tabs nav-fill mb-3">';
+  const tabs = [
+    {id:'attendance', label:t('tabAttendance'), count: presentInGroup+'/'+filteredSorted.length},
+    {id:'paid', label:t('tabPaid'), count: paidList.length},
+    {id:'unpaid', label:t('tabUnpaid'), count: unpaidList.length}
+  ];
+  tabs.forEach(function(tb){
+    html += '<button class="nav-link d-flex flex-column align-items-center att-tab '+(state.tab===tb.id?'active':'')+'" onclick="state.tab=\''+tb.id+'\'; render();">';
+    html += '<span class="n">'+tb.count+'</span><span>'+tb.label+'</span></button>';
+  });
+  html += '</div>';
+
+  html += '<div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">';
+  if(state.tab==='attendance'){
+    html += '<div class="d-flex align-items-center gap-1 small"><button class="btn btn-sm btn-outline-dark" onclick="state.selectedDate=shiftDay(state.selectedDate,-1); render();">&#8594;</button>';
+    html += '<span class="fw-bold att-datelabel">'+formatDateAr(state.selectedDate)+'</span>';
+    html += '<button class="btn btn-sm btn-outline-dark" onclick="state.selectedDate=shiftDay(state.selectedDate,1); render();">&#8592;</button>';
+    html += '<span class="att-caldwrap"><button class="btn btn-sm btn-dark att-calbtn" tabindex="-1">&#128197;</button><input class="att-realdate" type="date" value="'+state.selectedDate+'" onchange="onDateChange(this.value)"></span>';
+    html += '</div>';
+  } else { html += '<div></div>'; }
+  html += '<div class="d-flex align-items-center gap-2"><div class="input-group input-group-sm att-search"><span class="input-group-text">&#128269;</span><input class="form-control" placeholder="'+t('searchPlaceholder')+'" value="'+esc(state.search)+'" oninput="onSearchInput(this)"></div>';
+  html += '<button class="btn btn-sm btn-outline-dark" onclick="state.sortDir=state.sortDir===\'asc\'?\'desc\':\'asc\'; render();">'+(state.sortDir==='asc'?t('sortAsc'):t('sortDesc'))+'</button></div>';
+  html += '</div>';
+
+  html += '<div class="list-group list-group-flush border-top">';
+
+  if(state.tab==='attendance'){
+    if(filteredSorted.length===0){
+      html += '<div class="text-center text-secondary small py-4">'+t('noMembersInGroup')+'</div>';
+    } else {
+      filteredSorted.forEach(function(m,i){
+        const present = presentToday.includes(m.id);
+        const exempt = isExempt(m.id);
+        const cCount = cycleCount(m.id);
+        const inCycle = (cCount % CYCLE_LENGTH === 0 && cCount > 0) ? CYCLE_LENGTH : cCount % CYCLE_LENGTH;
+        const sev = severity(m.id);
+        html += '<div class="list-group-item d-flex align-items-center gap-2 px-1 att-row"><span class="seq">'+(i+1)+'</span>';
+        html += '<button class="btn btn-link text-decoration-none text-body text-start p-0 flex-grow-1 fw-medium" onclick="openDetail(\''+m.id+'\')">&#128100; '+esc(m.name)+'</button>';
+        if(exempt){ html += '<span class="badge rounded-pill att-flag exempt">'+t('flagExempt')+'</span>'; }
+        else {
+          html += '<span class="badge rounded-pill border fw-normal text-secondary att-progress">'+inCycle+'/'+CYCLE_LENGTH+'</span>';
+          if(sev==='orange') html += '<span class="badge rounded-pill att-flag orange">'+t('flagOverdue')+'</span>';
+          if(sev==='red') html += '<span class="badge rounded-pill att-flag red">'+t('flagVeryOverdue')+'</span>';
+        }
+        html += '<button class="btn btn-sm btn-outline-dark rounded-circle att-check '+(present?'active':'')+'" onclick="toggleAttendance(\''+m.id+'\')">'+(present?'&#10003;':'')+'</button>';
+        if(isTeacher()){ html += '<button class="btn btn-sm btn-link text-secondary p-1" onclick="removeMember(\''+m.id+'\')">&#128465;</button>'; }
+        html += '</div>';
+      });
+    }
+  } else if(state.tab==='paid'){
+    if(paidList.length===0){ html += '<div class="text-center text-secondary small py-4">'+t('noPaidYet')+'</div>'; }
+    else {
+      paidList.forEach(function(m,i){
+        const cycle = currentCycle(m.id);
+        const amt = state.payments[m.id][cycle].amount;
+        html += '<div class="list-group-item d-flex align-items-center gap-2 px-1 att-row"><span class="seq">'+(i+1)+'</span><button class="btn btn-link text-decoration-none text-body text-start p-0 flex-grow-1 fw-medium" onclick="openDetail(\''+m.id+'\')">'+esc(m.name)+'</button>';
+        html += '<span class="badge rounded-pill border fw-normal text-secondary att-progress">'+t('cycleLabel')+' '+cycle+'</span>';
+        html += '<input class="form-control form-control-sm att-amount" type="number" value="'+amt+'" onchange="updatePaidAmount(\''+m.id+'\', '+cycle+', this.value)">';
+        html += '<button class="btn btn-sm btn-outline-danger" onclick="markUnpaidCycle(\''+m.id+'\', '+cycle+')">'+t('markUnpaid')+'</button></div>';
+      });
+    }
+  } else {
+    if(unpaidList.length===0){ html += '<div class="text-center text-secondary small py-4">'+t('noUnpaidDue')+'</div>'; }
+    else {
+      unpaidList.forEach(function(m,i){
+        const cycle = currentCycle(m.id);
+        const sev = severity(m.id);
+        const draft = state.amountDrafts[m.id] != null ? state.amountDrafts[m.id] : '';
+        html += '<div class="list-group-item d-flex align-items-center gap-2 px-1 att-row"><span class="seq">'+(i+1)+'</span><button class="btn btn-link text-decoration-none text-body text-start p-0 flex-grow-1 fw-medium" onclick="openDetail(\''+m.id+'\')">'+esc(m.name)+'</button>';
+        html += '<span class="badge rounded-pill att-flag '+(sev==='red'?'red':'orange')+'">'+(sev==='red'?t('flagVeryOverdue'):t('flagOverdue'))+'</span>';
+        html += '<input class="form-control form-control-sm att-amount" type="number" placeholder="'+state.settings.fee+'" value="'+draft+'" oninput="state.amountDrafts[\''+m.id+'\']=this.value">';
+        html += '<button class="btn btn-sm btn-outline-success" onclick="markPaidCycle(\''+m.id+'\', '+cycle+')">'+t('markPaid')+'</button></div>';
+      });
+    }
+    if(notDueMembers.length > 0){
+      html += '<div class="small text-secondary py-2">'+t('notDuePrefix')+'<div class="d-flex flex-wrap gap-1 mt-1 att-chips">';
+      html += notDueMembers.map(function(m){return '<span class="badge border fw-normal att-chip">'+esc(m.name)+' · '+cycleCount(m.id)+'/'+CYCLE_LENGTH+'</span>';}).join('');
+      html += '</div></div>';
+    }
+    if(exemptMembers.length > 0){
+      html += '<div class="small text-secondary py-2">'+t('exemptPrefix')+'<div class="d-flex flex-wrap gap-1 mt-1 att-chips">';
+      html += exemptMembers.map(function(m){return '<span class="badge border fw-normal att-chip">'+esc(m.name)+'</span>';}).join('');
+      html += '</div></div>';
+    }
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderDetail(){
+  const m = state.members.find(function(x){return x.id===state.selectedMemberId;});
+  if(!m){ state.screen='main'; return renderMain(); }
+  const hist = getHistory(m.id);
+  const count = attendanceCount(m.id);
+  const cycle = currentCycle(m.id);
+  const sev = severity(m.id);
+  const exempt = isExempt(m.id);
+  let html = '<button class="btn btn-sm btn-outline-dark mb-3" onclick="state.screen=\'main\'; render();">'+t('back')+'</button>';
+  html += '<h2 class="h4 fw-bold mb-3">'+esc(m.name)+'</h2>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('groupSection')+'</h3><div class="d-flex flex-wrap gap-2">';
+  GROUPS.forEach(function(g){ html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(m.group===g.id?'active':'')+'" onclick="moveMemberGroup(\''+m.id+'\', \''+g.id+'\')">'+t('groupLabel')[g.id]+'</button>'; });
+  html += '</div></div>';
+
+  const detailSlots = getHourSlots(m.group);
+  if(detailSlots.length > 0){
+    html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('hourSlotSection')+'</h3><div class="d-flex flex-wrap gap-2">';
+    html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(!m.hourSlot?'active':'')+'" onclick="moveMemberHourSlot(\''+m.id+'\', null)">'+t('noHourSlot')+'</button>';
+    detailSlots.forEach(function(slot){
+      html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(m.hourSlot===slot?'active':'')+'" onclick="moveMemberHourSlot(\''+m.id+'\', \''+esc(slot)+'\')">'+esc(slot)+'</button>';
+    });
+    html += '</div></div>';
+  }
+
+  const detailGrades = getGrades();
+  if(detailGrades.length > 0){
+    html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('gradeSection')+'</h3><div class="d-flex flex-wrap gap-2">';
+    html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(!m.grade?'active':'')+'" onclick="setMemberGrade(\''+m.id+'\', null)">'+t('noGrade')+'</button>';
+    detailGrades.forEach(function(g){ html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(m.grade===g?'active':'')+'" onclick="setMemberGrade(\''+m.id+'\', \''+esc(g)+'\')">'+esc(g)+'</button>'; });
+    html += '</div></div>';
+  }
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('contactSection')+'</h3>';
+  html += '<p class="small text-secondary">'+t('phoneLabel')+'</p><div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">';
+  html += '<input type="tel" class="form-control form-control-sm" style="margin-top:0" value="'+esc(m.phone||'')+'" placeholder="'+t('noPhone')+'" onchange="updateMemberContact(\''+m.id+'\',\'phone\',this.value)">';
+  if(m.phone){ html += '<a class="btn btn-sm btn-outline-dark" href="tel:'+esc(m.phone)+'" style="text-decoration:none;white-space:nowrap">'+t('call')+'</a>'; }
+  html += '</div>';
+  html += '<p class="small text-secondary">'+t('parentPhoneLabel')+'</p><div style="display:flex;gap:6px;align-items:center">';
+  html += '<input type="tel" class="form-control form-control-sm" style="margin-top:0" value="'+esc(m.parentPhone||'')+'" placeholder="'+t('noPhone')+'" onchange="updateMemberContact(\''+m.id+'\',\'parentPhone\',this.value)">';
+  if(m.parentPhone){ html += '<a class="btn btn-sm btn-outline-dark" href="tel:'+esc(m.parentPhone)+'" style="text-decoration:none;white-space:nowrap">'+t('call')+'</a>'; }
+  html += '</div></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><label class="d-flex align-items-center gap-2 small"><input class="form-check-input mt-0" type="checkbox" '+(exempt?'checked':'')+(isTeacher()?' onchange="toggleExempt(\''+m.id+'\')"':' disabled')+'> '+t('exemptCheckbox')+(isTeacher()?'':' <span class="small text-secondary">('+t('teacherOnlyNote')+')</span>')+'</label></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('attendanceSection')+'</h3><p class="small text-secondary">'+t('totalAttendance')(count)+'</p>';
+  html += hist.days.length===0 ? '<span class="small text-secondary">'+t('noAttendanceYet')+'</span>' :
+    '<div class="d-flex flex-wrap gap-1 mt-1 att-chips">'+hist.days.map(function(d){return '<span class="badge border fw-normal att-chip">'+formatDateAr(d)+'</span>';}).join('')+'</div>';
+  html += '</div>';
+
+  const missed = missedDays(m.id);
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('absenceSection')+'</h3><p class="small text-secondary">'+t('absenceHint')(groupDaysLabel(GROUPS.find(function(g){return g.id===m.group;})))+'</p>';
+  html += missed.length===0 ? '<span class="small text-secondary">'+t('noAbsences')+'</span>' :
+    '<div class="d-flex flex-wrap gap-1 mt-1 att-chips">'+missed.map(function(d){return '<span class="badge border fw-normal att-chip" style="border-color:var(--unpaid);color:var(--unpaid);background:var(--unpaid-bg)">'+formatDateAr(d)+'</span>';}).join('')+'</div>';
+  html += '</div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('collectionSection')+'</h3>';
+  if(!exempt && cycle >= 1){
+    if(sev){
+      html += '<p class="small text-secondary">'+t('statusOf')(cycle)+' <span class="badge rounded-pill att-flag '+(sev==='red'?'red':'orange')+'">'+(sev==='red'?t('flagVeryOverdue'):t('flagOverdue'))+'</span></p>';
+      html += '<button class="btn btn-sm btn-outline-success" onclick="markPaidCycle(\''+m.id+'\', '+cycle+')">'+t('markPaid')+'</button>';
+    } else {
+      html += '<p class="small text-secondary">'+t('currentPaid')+'</p>';
+      html += '<button class="btn btn-sm btn-outline-danger" onclick="markUnpaidCycle(\''+m.id+'\', '+cycle+')">'+t('markUnpaid')+'</button>';
+    }
+  } else if(!exempt){
+    html += '<p class="small text-secondary">'+t('notYetDue')(cycleCount(m.id))+'</p>';
+  } else {
+    html += '<p class="small text-secondary">'+t('exemptNotice')+'</p>';
+  }
+  html += hist.paidCycles.length===0 ? '<p class="small text-secondary">'+t('noPaymentHistory')+'</p>' :
+    '<div class="d-flex flex-wrap gap-1 mt-1 att-chips">'+hist.paidCycles.map(function(e){return '<span class="badge border fw-normal att-chip pay">'+t('cycleLabel')+' '+e[0]+' · '+e[1].amount+' ج.م</span>';}).join('')+'</div>';
+  html += '</div>';
+
+  if(!exempt){
+    const advDraft = state.advanceDrafts[m.id] || {};
+    html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('advancePaymentTitle')+'</h3><p class="small text-secondary">'+t('advancePaymentHint')+'</p>';
+    html += '<div style="display:flex;gap:6px;margin-top:6px">';
+    html += '<input type="number" min="1" class="form-control form-control-sm att-amount" style="width:5.5rem" placeholder="'+t('advanceCountPlaceholder')+'" value="'+(advDraft.count||'')+'" oninput="state.advanceDrafts[\''+m.id+'\']=Object.assign({},state.advanceDrafts[\''+m.id+'\'],{count:this.value})">';
+    html += '<input type="number" min="0" class="form-control form-control-sm att-amount" style="width:8rem" placeholder="'+t('advanceAmountPlaceholder')+'" value="'+(advDraft.amount||'')+'" oninput="state.advanceDrafts[\''+m.id+'\']=Object.assign({},state.advanceDrafts[\''+m.id+'\'],{amount:this.value})">';
+    html += '<button class="btn btn-sm btn-outline-dark" onclick="payAdvance(\''+m.id+'\', (state.advanceDrafts[\''+m.id+'\']||{}).count, (state.advanceDrafts[\''+m.id+'\']||{}).amount)">'+t('advancePaymentBtn')+'</button>';
+    html += '</div></div>';
+  }
+
+  if(isTeacher()){ html += '<button class="btn btn-sm btn-outline-danger" onclick="removeMember(\''+m.id+'\')">'+t('deleteMember')+'</button>'; }
+  return html;
+}
+
+function renderSettings(){
+  const summary = paymentsSummary();
+  let html = '<button class="btn btn-sm btn-outline-dark mb-3" onclick="state.screen=\'main\'; render();">'+t('back')+'</button>';
+  html += '<h2 class="h4 fw-bold mb-3">'+t('settingsTitle')+'</h2>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('accountTitle')+'</h3><p class="small text-secondary">'+t('teacherCodeLabel')+'</p>';
+  html += '<div class="d-flex flex-wrap gap-2"><span class="badge border fw-normal att-chip" style="font-size:1rem;letter-spacing:2px;padding:6px 14px">'+esc(state.teacherCode||'')+'</span>';
+  if(!isTeacher()){ html += '<span class="badge rounded-pill att-flag orange">'+t('assistantBadge')+'</span>'; }
+  html += '<button class="btn btn-sm btn-outline-dark" onclick="copyTeacherCode()">'+t('copyCode')+'</button></div>';
+  if(state.syncStatus){ html += '<p class="small text-secondary mt-1">'+esc(state.syncStatus)+'</p>'; }
+  html += '<div class="d-flex flex-wrap gap-2" style="margin-top:8px"><button class="btn btn-sm btn-outline-dark" onclick="syncNow()">'+t('syncNow')+'</button><button class="btn btn-sm btn-outline-dark" onclick="doLogout()">'+t('logout')+'</button></div></div>';
+
+  if(isTeacher()){
+    html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('teacherPasswordTitle')+'</h3><p class="small text-secondary">'+t('teacherPasswordHint')+'</p>';
+    html += '<input id="teacherPasswordInput" class="form-control form-control-sm" type="password" placeholder="'+t('password')+'" value="">';
+    html += '<button class="btn btn-sm btn-outline-dark" style="margin-top:6px" onclick="saveTeacherPassword(document.getElementById(\'teacherPasswordInput\').value)">'+t('changePasswordBtn')+'</button>';
+    html += '</div>';
+  }
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('languageTitle')+'</h3><div class="d-flex flex-wrap gap-2">';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(lang()==='ar'?'active':'')+'" onclick="setLang(\'ar\')">العربية</button>';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(lang()==='en'?'active':'')+'" onclick="setLang(\'en\')">English</button>';
+  html += '</div></div>';
+
+  if(isTeacher()){
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('feeTitle')+'</h3><input class="form-control form-control-sm" type="number" value="'+state.settings.fee+'" onchange="saveFeeValue(this.value)">';
+  html += '<p class="small text-secondary">'+t('feeHint')+'</p></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('cycleModeTitle')+'</h3><div class="d-flex flex-wrap gap-2">';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.settings.cycleMode!=='group'?'active':'')+'" onclick="state.settings.cycleMode=\'personal\'; persistSettings(); render();">'+t('cycleModePersonal')+'</button>';
+  html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.settings.cycleMode==='group'?'active':'')+'" onclick="state.settings.cycleMode=\'group\'; persistSettings(); render();">'+t('cycleModeGroup')+'</button>';
+  html += '</div><p class="small text-secondary">'+t('cycleModeHint')+'</p></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('hourSlotsTitle')+'</h3>';
+  GROUPS.forEach(function(g){
+    const slots = getHourSlots(g.id);
+    html += '<p class="small text-secondary" style="margin-top:10px;font-weight:700;color:var(--ink)">'+t('groupLabel')[g.id]+'</p>';
+    html += '<div class="d-flex flex-wrap gap-1 mt-1 att-chips">';
+    if(slots.length === 0){ html += '<span class="small text-secondary">'+t('noHourSlot')+'</span>'; }
+    else slots.forEach(function(slot){
+      html += '<span class="badge border fw-normal att-chip">'+esc(slot)+' <span style="cursor:pointer;color:var(--unpaid);font-weight:700" onclick="removeHourSlot(\''+g.id+'\', \''+esc(slot)+'\')">&times;</span></span>';
+    });
+    html += '</div>';
+    html += '<div class="d-flex gap-2" style="display:flex;gap:6px;margin-top:6px"><input id="hourSlotInput_'+g.id+'" class="form-control form-control-sm" style="margin-top:0" type="text" placeholder="'+t('hourSlotPlaceholder')+'" onkeydown="if(event.key==\'Enter\'){addHourSlot(\''+g.id+'\', this.value);}">';
+    html += '<button class="btn btn-sm btn-outline-dark" onclick="addHourSlot(\''+g.id+'\', document.getElementById(\'hourSlotInput_'+g.id+'\').value)">'+t('addHourSlotBtn')+'</button></div>';
+  });
+  html += '</div>';
+  }
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('fontSizeTitle')+'</h3><div class="d-flex flex-wrap gap-2">';
+  [['small',t('small')],['medium',t('medium')],['large',t('large')]].forEach(function(pair){
+    html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.settings.fontSize===pair[0]?'active':'')+'" onclick="setFontSize(\''+pair[0]+'\')">'+pair[1]+'</button>';
+  });
+  html += '</div></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><label class="d-flex align-items-center gap-2 small"><input class="form-check-input mt-0" type="checkbox" '+(state.settings.highContrast?'checked':'')+' onchange="setHighContrast(this.checked)"> '+t('highContrastLabel')+'</label></div>';
+
+  if(isTeacher()){
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('exemptListTitle')+'</h3><div class="border rounded p-1 att-settingslist">';
+  if(state.members.length===0){ html += '<p class="small text-secondary">'+t('noMembersYet')+'</p>'; }
+  else state.members.forEach(function(m){
+    html += '<div class="d-flex align-items-center gap-2 py-1 border-bottom small"><input class="form-check-input mt-0" type="checkbox" '+(m.exempt?'checked':'')+' onchange="toggleExempt(\''+m.id+'\')"><span class="nm">'+esc(m.name)+'</span><span class="small text-secondary">'+t('groupLabel')[m.group]+'</span></div>';
+  });
+  html += '</div></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('bulkMoveTitle')+'</h3><div class="border rounded p-1 att-settingslist">';
+  if(state.members.length===0){ html += '<p class="small text-secondary">'+t('noMembersYet')+'</p>'; }
+  else state.members.forEach(function(m){
+    html += '<div class="d-flex align-items-center gap-2 py-1 border-bottom small"><input class="form-check-input mt-0" type="checkbox" '+(state.bulkSelected[m.id]?'checked':'')+' onchange="state.bulkSelected[\''+m.id+'\']=this.checked"><span class="nm">'+esc(m.name)+'</span><span class="small text-secondary">'+t('groupLabel')[m.group]+'</span></div>';
+  });
+  html += '</div><div class="d-flex flex-wrap gap-2" style="margin-top:8px">';
+  GROUPS.forEach(function(g){ html += '<button class="btn btn-sm rounded-pill btn-outline-dark '+(state.bulkTargetGroup===g.id?'active':'')+'" onclick="state.bulkTargetGroup=\''+g.id+'\'; render();">'+t('groupLabel')[g.id]+'</button>'; });
+  html += '</div><button class="btn btn-sm btn-dark" style="margin-top:8px" onclick="bulkMove()">'+t('bulkMoveBtn')+'</button></div>';
+  }
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('summaryTitle')+'</h3><table class="table table-sm mb-0">';
+  html += '<tr><td>'+t('summaryTotal')+'</td><td>'+summary.total+' ج.م</td></tr>';
+  GROUPS.forEach(function(g){ html += '<tr><td>'+t('groupLabel')[g.id]+'</td><td>'+(summary.byGroup[g.id]||0)+' ج.م</td></tr>'; });
+  const cycles = Object.keys(summary.byCycle).sort(function(a,b){return Number(a)-Number(b);});
+  if(cycles.length===0){ html += '<tr><td colspan="2" class="small text-secondary">'+t('summaryNoData')+'</td></tr>'; }
+  else cycles.forEach(function(c){ html += '<tr><td>'+t('summaryCycleRow')(c)+'</td><td>'+summary.byCycle[c]+' ج.م</td></tr>'; });
+  html += '</table></div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('importTitle')+'</h3><p class="small text-secondary">'+t('importHint')+'</p>';
+  html += '<input id="importFileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(this)">';
+  html += '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" onclick="document.getElementById(\'importFileInput\').click()">'+t('importBtn')+'</button>';
+  html += '<button class="btn btn-sm btn-outline-dark" onclick="downloadImportTemplate()">'+t('downloadTemplateBtn')+'</button></div>';
+  if(state.importStatus){ html += '<p class="small text-secondary mt-1">'+esc(state.importStatus)+'</p>'; }
+  html += '</div>';
+
+  html += '<div class="mb-3 pb-3 border-bottom"><h3 class="h6 fw-semibold">'+t('exportTitle')+'</h3><p class="small text-secondary">'+t('exportHint')+'</p>';
+  html += '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" onclick="exportCSV()">'+t('exportCsvBtn')+'</button>';
+  html += '<button class="btn btn-sm btn-outline-dark" onclick="exportPDF()">'+t('exportPdfBtn')+'</button></div></div>';
+
+  if(isTeacher()){
+  html += '<div class="mb-3 pb-3"><h3 class="h6 fw-semibold">'+t('deleteAllTitle')+'</h3><p class="small text-secondary">'+t('deleteAllHint')+'</p>';
+  html += '<button class="btn btn-sm btn-outline-danger" onclick="deleteEverything()">'+t('deleteAllBtn')+'</button></div>';
+  } else {
+  html += '<div class="mb-3 pb-3"><p class="small text-secondary">'+t('teacherOnlyNote')+'</p></div>';
+  }
+
+  return html;
+}
+
+function render(){
+  const app = document.getElementById('app');
+  if(!state.ready){ app.innerHTML = '<div class="text-center text-secondary small py-4">'+t('loading')+'</div>'; return; }
+  if(state.authScreen){ app.innerHTML = renderAuth(); return; }
+  if(state.screen==='settings'){ app.innerHTML = renderSettings(); return; }
+  if(state.screen==='detail'){ app.innerHTML = renderDetail(); return; }
+  app.innerHTML = renderMain();
+}
+
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('sw.js').catch(function(){});
+  });
+}
+
+initLoad();
