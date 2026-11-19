@@ -156,6 +156,29 @@ ul.list-group > .list-group-item, ul.list-group > .list-group-item:last-child { 
 .table thead th { color: var(--ink-soft); font-weight: 700; border-bottom-width: 2px; }
 .table > tbody > tr:last-child > * { border-bottom-width: 0; }
 
+/* ---------- settings: tiles that open a page ---------- */
+.settings-tiles { display: flex; flex-direction: column; gap: .8rem; }
+.settings-tile { display: flex; align-items: center; gap: .9rem; width: 100%; padding: .85rem 1rem; text-align: start;
+  background: var(--surface); color: var(--ink); border: 2px solid var(--line); border-radius: 1.6rem; box-shadow: 0 .3rem 0 var(--line);
+  transition: transform .18s var(--bounce), box-shadow .18s var(--bounce); }
+.settings-tile:active { transform: translateY(.3rem) scale(.98); box-shadow: 0 0 0 var(--line); }
+@media (hover: hover) { .settings-tile:hover { transform: translateY(-.1rem); } }
+.tile-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 3.1rem; height: 3.1rem;
+  border-radius: 50%; font-size: 1.5rem; line-height: 1; background: var(--p1); }
+.tile-icon.sm { width: 2.5rem; height: 2.5rem; font-size: 1.25rem; }
+.settings-tile:nth-child(5n+2) .tile-icon { background: var(--p2); }
+.settings-tile:nth-child(5n+3) .tile-icon { background: var(--p3); }
+.settings-tile:nth-child(5n+4) .tile-icon { background: var(--p4); }
+.settings-tile:nth-child(5n+5) .tile-icon { background: var(--gold); }
+.tile-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.tile-title { font-weight: 800; font-size: 1.1rem; line-height: 1.3; }
+.tile-desc { color: var(--ink-soft); font-size: .88rem; line-height: 1.35; }
+.tile-arrow { font-size: 1.9rem; line-height: 1; color: var(--ink-soft); flex-shrink: 0; }
+html[dir="rtl"] .tile-arrow { transform: scaleX(-1); }
+.settings-danger { border-color: var(--bad); box-shadow: 0 .35rem 0 color-mix(in srgb, var(--bad) 35%, transparent); }
+.settings-danger h3 { color: var(--bad); }
+@media (prefers-reduced-motion: reduce) { .settings-tile { transition: none; } .settings-tile:active { transform: none; } }
+
 /* ---------- small app pieces ---------- */
 .score-input { width: 4.8rem; flex-shrink: 0; text-align: center; font-weight: 800; font-size: 1rem; }
 .date-label { min-width: 11rem; font-size: 1rem; }

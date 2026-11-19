@@ -26,7 +26,7 @@ let state = {
   screen: 'main', view: 'attend', selectedClass: 'all', selectedMemberId: null, selectedDate: null,
   search: '', sortDir: 'asc', adding: false, draft: { name: '', phone: '', parent: '', classId: null },
   welcomeMsg: '', importStatus: '', statusMsg: '', bulkFrom: '', bulkTo: '',
-  selectedTestId: null, addingTest: false, testDraft: { name: '', date: '', max: '', classId: null }
+  settingsPage: null, selectedTestId: null, addingTest: false, testDraft: { name: '', date: '', max: '', classId: null }
 };
 
 const lang = () => (state.settings.lang === 'en' ? 'en' : 'ar');
@@ -344,27 +344,78 @@ function bulkMove(from, to) {
   moved.forEach(m => { m.classId = to === 'none' ? null : to; });
   state.statusMsg = t('bulkDone', moved.length); persist(); render();
 }
+function moveClassOrder(id, dir) {          // list order = lowest class first
+  const cs = classes().slice(), i = cs.findIndex(c => c.id === id), j = i + dir;
+  if (i < 0 || j < 0 || j >= cs.length) return;
+  [cs[i], cs[j]] = [cs[j], cs[i]];
+  state.config.classes = cs; persist(); render();
+}
+function promoteAll() {                     // everyone up one class; first class ends up empty; last class is removed
+  const cs = classes();
+  if (cs.length < 2) { alert(t('promoteNeedTwo')); return; }
+  const count = id => state.members.filter(m => m.classId === id).length;
+  const plan = cs.map((c, i) => '\u2022 ' + c.name + ' (' + count(c.id) + ') \u2192 ' + (i < cs.length - 1 ? cs[i + 1].name : t('promoteDeleted'))).join('\n');
+  if (!confirm(t('promoteConfirm', plan))) return;
+  const dropTests = state.tests.length ? confirm(t('promoteTestsConfirm')) : false;
+  const next = {}; cs.forEach((c, i) => { if (i < cs.length - 1) next[c.id] = cs[i + 1].id; });
+  const gone = new Set(state.members.filter(m => m.classId === cs[cs.length - 1].id).map(m => m.id));
+  state.members.forEach(m => { if (next[m.classId]) m.classId = next[m.classId]; });
+  state.members = state.members.filter(m => !gone.has(m.id));
+  Object.keys(state.attendance).forEach(d => {
+    const r = state.attendance[d];
+    r.mass = (r.mass || []).filter(i => !gone.has(i)); r.meeting = (r.meeting || []).filter(i => !gone.has(i));
+    if (!r.mass.length && !r.meeting.length) delete state.attendance[d];
+  });
+  if (dropTests) state.tests = [];
+  else state.tests.forEach(tt => { tt.classId = null; gone.forEach(id => { delete tt.scores[id]; }); });   // kept tests become "all classes" so moved members keep their scores
+  state.selectedClass = 'all'; persist(); render();
+  alert(t('promoteDone', gone.size));
+}
 function deleteAll() {
   if (!confirm(t('deleteAllConfirm'))) return;
   state.members = []; state.attendance = {}; state.tests = []; persist(); render();
 }
 
 /* ================= export / import ================= */
-function download(name, text, type) {
-  const url = URL.createObjectURL(new Blob(['\uFEFF' + text], { type: type || 'text/csv;charset=utf-8;' }));
+function downloadBlob(name, blob) {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
-const csvCell = v => { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+function download(name, text, type) { downloadBlob(name, new Blob(['\uFEFF' + text], { type: type || 'text/csv;charset=utf-8;' })); }
+const pctCell = n => ({ v: n, z: '0"%"' });                     // a number shown as 85% (stays a number in .xlsx)
+const plainCell = c => (c && typeof c === 'object' ? c.v : c);
+const csvCell = v => {
+  if (v && typeof v === 'object') v = v.z ? v.v + '%' : v.v;
+  const s = String(v == null ? '' : v);
+  // Excel turns phone numbers / dates into numbers (0101… -> 1.01E+10) and runs text starting with = + - @ as a formula: force text
+  if (typeof v === 'string' && (/^[=+\-@]/.test(s) || /^[\d٠-٩][\d٠-٩\s+\-\/.()]*$/.test(s))) return '="' + s.replace(/"/g, '""') + '"';
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+};
 const toCSV = rows => rows.map(r => r.map(csvCell).join(',')).join('\r\n');
+const loadXLSX = () => Promise.race([ensureXLSX(), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))]);
+async function saveTable(base, rows) {      // real Excel file: phones/dates stay text, counts and scores stay numbers
+  try {
+    await loadXLSX();
+    const ws = XLSX.utils.aoa_to_sheet(rows.map(r => r.map(plainCell)));
+    rows.forEach((r, ri) => r.forEach((c, ci) => { if (c && typeof c === 'object' && c.z) { const a = ws[XLSX.utils.encode_cell({ r: ri, c: ci })]; if (a) a.z = c.z; } }));
+    ws['!cols'] = rows[0].map((_, ci) => ({ wch: Math.min(40, Math.max(8, ...rows.map(r => String(plainCell(r[ci]) == null ? '' : plainCell(r[ci])).length + 2))) }));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    downloadBlob(base + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  } catch (e) {
+    alert(t('exportFallback'));
+    download(base + '.csv', toCSV(rows));
+  }
+}
 function exportSummary() {
   const rows = [[t('colName'), t('colClass'), t('phoneLabel'), t('parentLabel'), t('addressLabel'), t('confessorLabel'), t('birthdayLabel'), t('colMass'), t('colMeeting'), t('colWeeks'), t('colPct'), t('colStreak')]];
   const { dates, weeks } = reportRows('all');
   sortByName(state.members).forEach(m => {
     const s = statsFor(m, dates, weeks);
-    rows.push([m.name, className(m.classId), m.phone || '', m.parentPhone || '', m.address || '', m.confessor || '', m.birthday || '', s.mass, s.meeting, s.total, s.pct + '%', s.streak]);
+    rows.push([m.name, className(m.classId), m.phone || '', m.parentPhone || '', m.address || '', m.confessor || '', m.birthday || '', s.mass, s.meeting, s.total, pctCell(s.pct), s.streak]);
   });
-  download('attendance_summary_' + todayISO() + '.csv', toCSV(rows));
+  saveTable('attendance_summary_' + todayISO(), rows);
 }
 function exportMatrix() {
   const weeks = buildWeeks(), dates = datesFor(state.members.map(m => m.id), weeks);
@@ -375,7 +426,7 @@ function exportMatrix() {
       return a && b ? t('both') : a ? t('mass') : b ? t('meeting') : '-';
     })]);
   });
-  download('attendance_by_week_' + todayISO() + '.csv', toCSV(rows));
+  saveTable('attendance_by_week_' + todayISO(), rows);
 }
 function printReport() {
   let html = '<h1>' + esc(t('appTitle')) + '</h1><p>' + esc(fmtWeek(latestAnchor())) + '</p>';
@@ -571,7 +622,7 @@ function exportTests() {
   const ts = state.tests.slice().sort((a, b) => -byDateDesc(a, b));
   const rows = [[t('colName'), t('colClass'), ...ts.map(tt => tt.name + ' (' + tt.date + ')' + (tt.max ? ' /' + fmtNum(tt.max) : ''))]];
   sortByName(state.members).forEach(m => rows.push([m.name, className(m.classId), ...ts.map(tt => typeof tt.scores[m.id] === 'number' ? tt.scores[m.id] : '')]));
-  download('tests_' + todayISO() + '.csv', toCSV(rows));
+  saveTable('tests_' + todayISO(), rows);
 }
 function testSummaryHTML(tt) {
   const s = testStats(tt), total = testScope(tt).length, mx = tt.max ? '/' + fmtNum(tt.max) : '';
@@ -670,25 +721,42 @@ function viewDetail() {
 }
 
 function viewSettings() {
-  const sec = (title, body, last) => '<div class="' + (last ? 'mb-3' : 'mb-3 pb-3 border-bottom') + '"><h3 class="h6 fw-semibold">' + esc(title) + '</h3>' + body + '</div>';
+  const sec = (title, body, danger) => '<div class="card card-body mb-3' + (danger ? ' settings-danger' : '') + '"><h3 class="h6 fw-bold mb-2">' + esc(title) + '</h3>' + body + '</div>';
+  const PAGES = [
+    { id: 'account', icon: '&#9729;&#65039;', title: 'setAccount', desc: 'setAccountDesc' },
+    { id: 'look', icon: '&#127912;', title: 'setLook', desc: 'setLookDesc' },
+    { id: 'classes', icon: '&#127979;', title: 'setClasses', desc: 'setClassesDesc' },
+    { id: 'data', icon: '&#128202;', title: 'setData', desc: 'setDataDesc' },
+    { id: 'year', icon: '&#127891;', title: 'deleteAllTitle', desc: 'setYearDesc' }
+  ];
+  const page = state.settingsPage, cur = PAGES.find(p => p.id === page);
   const classOpts = (withNone, sel) => '<option value="">—</option>' + classes().map(c => '<option value="' + esc(c.id) + '"' + (sel === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + (withNone ? '<option value="none"' + (sel === 'none' ? ' selected' : '') + '>' + esc(t('noClass')) + '</option>' : '');
-  let h = '<button class="btn btn-sm btn-outline-dark mb-3" data-act="back">' + esc(t('back')) + '</button><div id="syncBanner"></div><h2 class="h4 fw-bold mb-3">' + esc(t('settings')) + '</h2>';
-  h += sec(t('accountTitle'), '<p class="small text-secondary mb-1">' + esc(t('codeLabel')) + '</p><div class="d-flex flex-wrap align-items-center gap-2"><span class="badge border fw-normal code-badge">' + esc(state.teacherCode || '') + '</span>' + '<button class="btn btn-sm btn-outline-dark" data-act="copy-code">' + esc(t('copyCode')) + '</button></div>' +
+  let h = '<button class="btn btn-sm btn-outline-dark mb-3" data-act="back">' + esc(t('back')) + '</button><div id="syncBanner"></div>';
+  if (!cur) {
+    return h + '<h2 class="h4 fw-bold mb-3">' + esc(t('settings')) + '</h2><div class="settings-tiles">' + PAGES.map(p =>
+      '<button class="settings-tile" data-act="settings-page" data-page="' + p.id + '"><span class="tile-icon">' + p.icon + '</span>' +
+      '<span class="tile-text"><span class="tile-title">' + esc(t(p.title)) + '</span><span class="tile-desc">' + esc(t(p.desc)) + '</span></span><span class="tile-arrow" aria-hidden="true">&#8250;</span></button>').join('') + '</div>';
+  }
+  h += '<div class="d-flex align-items-center gap-2 mb-3"><span class="tile-icon sm">' + cur.icon + '</span><h2 class="h4 fw-bold mb-0">' + esc(t(cur.title)) + '</h2></div>';
+  if (page === 'account') h += sec(t('accountTitle'), '<p class="small text-secondary mb-1">' + esc(t('codeLabel')) + '</p><div class="d-flex flex-wrap align-items-center gap-2"><span class="badge border fw-normal code-badge">' + esc(state.teacherCode || '') + '</span>' + '<button class="btn btn-sm btn-outline-dark" data-act="copy-code">' + esc(t('copyCode')) + '</button></div>' +
     '<p id="syncStatusLine" class="small text-secondary mt-1 mb-0"></p><div class="d-flex flex-wrap gap-2 mt-2"><button class="btn btn-sm btn-outline-dark" data-act="sync-now">' + esc(t('syncNow')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="logout">' + esc(t('logout')) + '</button></div>');
-  h += sec(t('passwordTitle'), '<p class="small text-secondary">' + esc(t('passwordHint')) + '</p><div class="d-flex gap-2"><input id="newTeacherPw" class="form-control form-control-sm" type="password" placeholder="' + esc(t('password')) + '" data-enter="save-password"><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="save-password">' + esc(t('save')) + '</button></div>');
+  if (page === 'account') h += sec(t('passwordTitle'), '<p class="small text-secondary">' + esc(t('passwordHint')) + '</p><div class="d-flex gap-2"><input id="newTeacherPw" class="form-control form-control-sm" type="password" placeholder="' + esc(t('password')) + '" data-enter="save-password"><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="save-password">' + esc(t('save')) + '</button></div>');
   const dayOpts = cur => DAY_NAMES[lang()].map((n, i) => '<option value="' + i + '"' + (cur === i ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
-  h += sec(t('daysTitle'), '<p class="small text-secondary">' + esc(t('daysHint')) + '</p><div class="d-flex gap-2"><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('massDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="mass">' + dayOpts(massDay()) + '</select></div><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('meetingDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="meeting">' + dayOpts(meetingDay()) + '</select></div></div>');
-  h += sec(t('languageTitle'), '<div class="d-flex flex-wrap gap-2">' + langBtns() + '</div>');
-  h += sec(t('fontTitle'), '<div class="d-flex flex-wrap gap-2">' + ['small', 'medium', 'large'].map(k => btnPill(state.settings.fontSize === k, 'font', 'data-size="' + k + '"', esc(t(k)))).join('') + '</div><label class="d-flex align-items-center gap-2 small mt-2"><input class="form-check-input mt-0" type="checkbox" ' + (state.settings.highContrast ? 'checked' : '') + ' data-change="contrast"> ' + esc(t('highContrast')) + '</label>');
-  {
+  if (page === 'classes') h += sec(t('daysTitle'), '<p class="small text-secondary">' + esc(t('daysHint')) + '</p><div class="d-flex gap-2"><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('massDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="mass">' + dayOpts(massDay()) + '</select></div><div class="flex-fill"><label class="form-label small text-secondary">' + esc(t('meetingDayLabel')) + '</label><select class="form-select form-select-sm" data-change="set-day" data-which="meeting">' + dayOpts(meetingDay()) + '</select></div></div>');
+  if (page === 'look') h += sec(t('languageTitle'), '<div class="d-flex flex-wrap gap-2">' + langBtns() + '</div>');
+  if (page === 'look') h += sec(t('fontTitle'), '<div class="d-flex flex-wrap gap-2">' + ['small', 'medium', 'large'].map(k => btnPill(state.settings.fontSize === k, 'font', 'data-size="' + k + '"', esc(t(k)))).join('') + '</div><label class="d-flex align-items-center gap-2 small mt-2"><input class="form-check-input mt-0" type="checkbox" ' + (state.settings.highContrast ? 'checked' : '') + ' data-change="contrast"> ' + esc(t('highContrast')) + '</label>');
+  if (page === 'classes') {
     h += sec(t('classesTitle'), '<p class="small text-secondary">' + esc(t('classesHint')) + '</p>' +
-      (classes().length ? '<ul class="list-group list-group-flush mb-2">' + classes().map(c => '<li class="list-group-item d-flex gap-2 px-0"><input class="form-control form-control-sm" value="' + esc(c.name) + '" data-change="rename-class" data-id="' + esc(c.id) + '"><button class="btn btn-sm btn-outline-danger" data-act="delete-class" data-id="' + esc(c.id) + '" aria-label="' + esc(t('delete')) + '">&times;</button></li>').join('') + '</ul>' : '') +
+      (classes().length ? '<ul class="list-group list-group-flush mb-2">' + classes().map((c, i) => '<li class="list-group-item d-flex gap-2 px-0"><input class="form-control form-control-sm" value="' + esc(c.name) + '" data-change="rename-class" data-id="' + esc(c.id) + '"><button class="btn btn-sm btn-outline-dark" data-act="class-up" data-id="' + esc(c.id) + '" aria-label="' + esc(t('moveUp')) + '"' + (i === 0 ? ' disabled' : '') + '>&#9650;</button><button class="btn btn-sm btn-outline-dark" data-act="class-down" data-id="' + esc(c.id) + '" aria-label="' + esc(t('moveDown')) + '"' + (i === classes().length - 1 ? ' disabled' : '') + '>&#9660;</button><button class="btn btn-sm btn-outline-danger" data-act="delete-class" data-id="' + esc(c.id) + '" aria-label="' + esc(t('delete')) + '">&times;</button></li>').join('') + '</ul>' : '') +
       '<div class="d-flex gap-2"><input id="newClass" class="form-control form-control-sm" placeholder="' + esc(t('classNamePh')) + '" data-enter="add-class"><button class="btn btn-sm btn-dark text-nowrap" data-act="add-class">' + esc(t('addClass')) + '</button></div>');
     h += sec(t('bulkTitle'), '<p class="small text-secondary">' + esc(t('bulkHint')) + '</p><div class="d-flex gap-2 align-items-center"><select id="bulkFrom" class="form-select form-select-sm">' + classOpts(true, state.bulkFrom) + '</select><span>&#8594;</span><select id="bulkTo" class="form-select form-select-sm">' + classOpts(true, state.bulkTo) + '</select><button class="btn btn-sm btn-outline-dark text-nowrap" data-act="bulk-move">' + esc(t('bulkBtn')) + '</button></div>' + (state.statusMsg ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.statusMsg) + '</p>' : ''));
   }
-  h += sec(t('importTitle'), '<p class="small text-secondary">' + esc(t('importHint')) + '</p><input id="importFile" type="file" accept=".xlsx,.xls,.csv" class="d-none" data-change="import"><div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="import-pick">' + esc(t('importBtn')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="template">' + esc(t('templateBtn')) + '</button></div>' + (state.importStatus ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.importStatus) + '</p>' : ''));
-  h += sec(t('exportTitle'), '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="export-summary">' + esc(t('exportSummary')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-matrix">' + esc(t('exportMatrix')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-tests">' + esc(t('exportTests')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="print">' + esc(t('printBtn')) + '</button></div>');
-  h += sec(t('deleteAllTitle'), '<p class="small text-secondary">' + esc(t('deleteAllHint')) + '</p><button class="btn btn-sm btn-outline-danger" data-act="delete-all">' + esc(t('deleteAllBtn')) + '</button>', true);
+  if (page === 'data') h += sec(t('importTitle'), '<p class="small text-secondary">' + esc(t('importHint')) + '</p><input id="importFile" type="file" accept=".xlsx,.xls,.csv" class="d-none" data-change="import"><div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="import-pick">' + esc(t('importBtn')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="template">' + esc(t('templateBtn')) + '</button></div>' + (state.importStatus ? '<p class="small text-secondary mt-1 mb-0">' + esc(state.importStatus) + '</p>' : ''));
+  if (page === 'data') h += sec(t('exportTitle'), '<div class="d-flex flex-wrap gap-2"><button class="btn btn-sm btn-outline-dark" data-act="export-summary">' + esc(t('exportSummary')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-matrix">' + esc(t('exportMatrix')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="export-tests">' + esc(t('exportTests')) + '</button><button class="btn btn-sm btn-outline-dark" data-act="print">' + esc(t('printBtn')) + '</button></div>');
+  if (page === 'year') {
+    h += sec(t('promoteBtn'), '<p class="small text-secondary">' + esc(t('promoteHint')) + '</p><button class="btn btn-sm btn-dark" data-act="promote-all">' + esc(t('promoteBtn')) + '</button>');
+    h += sec(t('deleteAllBtn'), '<p class="small text-secondary">' + esc(t('deleteAllHint')) + '</p><button class="btn btn-sm btn-outline-danger" data-act="delete-all">' + esc(t('deleteAllBtn')) + '</button>', true);
+  }
   return h;
 }
 
@@ -711,8 +779,11 @@ function act(name, el) {
     case 'create-code': return createCode(val('newPw'), val('newPw2'));
     case 'join-code': return joinCode(val('joinCode'), val('joinPw'));
     case 'logout': return logout();
-    case 'settings': state.screen = 'settings'; state.statusMsg = ''; return render();
-    case 'back': state.screen = 'main'; return render();
+    case 'settings': state.screen = 'settings'; state.settingsPage = null; state.statusMsg = ''; return render();
+    case 'settings-page': state.settingsPage = d.page; window.scrollTo(0, 0); return render();
+    case 'back':
+      if (state.screen === 'settings' && state.settingsPage) { state.settingsPage = null; window.scrollTo(0, 0); return render(); }   // one level at a time
+      state.screen = 'main'; return render();
     case 'dismiss-welcome': state.welcomeMsg = ''; return render();
     case 'add-toggle':
       state.adding = !state.adding;
@@ -754,6 +825,9 @@ function act(name, el) {
     case 'set-test-class': { const tt = testById(d.id); if (tt) { tt.classId = d.class || null; persist(); render(); } return; }
     case 'delete-test': return deleteTest(d.id);
     case 'export-tests': return exportTests();
+    case 'class-up': return moveClassOrder(d.id, -1);
+    case 'class-down': return moveClassOrder(d.id, 1);
+    case 'promote-all': return promoteAll();
     case 'delete-all': return deleteAll();
   }
 }
